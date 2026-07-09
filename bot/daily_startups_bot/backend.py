@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from http.client import HTTPException
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -71,9 +72,18 @@ class BackendClient:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read()
         except HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise BackendError(f"backend {method} {path} failed: {exc.code} {details}") from exc
+            raise BackendError(
+                f"backend {method} {path} failed with status {exc.code}"
+            ) from exc
+        except (HTTPException, OSError) as exc:
+            raise BackendError(f"backend {method} {path} is unavailable") from exc
 
         if not body:
             return {}
-        return json.loads(body.decode("utf-8"))
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise BackendError(f"backend {method} {path} returned invalid JSON") from exc
+        if not isinstance(decoded, dict):
+            raise BackendError(f"backend {method} {path} returned invalid JSON")
+        return decoded

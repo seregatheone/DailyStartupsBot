@@ -1,0 +1,380 @@
+package httpapi
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/config"
+	v1 "github.com/seregatheone/DailyStartupsBot/backend/internal/contracts/v1"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/digest"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/ingestion"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
+)
+
+const maxRequestBytes = 1 << 20
+
+type subscriberStore interface {
+	SaveSubscriber(context.Context, storage.Subscriber) error
+	GetSubscriber(context.Context, int64) (storage.Subscriber, error)
+	SavePreferences(context.Context, storage.Preferences) error
+	GetPreferences(context.Context, int64) (storage.Preferences, error)
+}
+
+type Server struct {
+	config config.Config
+	store  subscriberStore
+	now    func() time.Time
+	mux    *http.ServeMux
+}
+
+func NewServer(cfg config.Config, store subscriberStore) *Server {
+	server := &Server{
+		config: cfg,
+		store:  store,
+		now:    func() time.Time { return time.Now().UTC() },
+		mux:    http.NewServeMux(),
+	}
+	server.routes()
+	return server
+}
+
+func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	server.mux.ServeHTTP(writer, request)
+}
+
+func (server *Server) routes() {
+	server.mux.HandleFunc("GET /health", server.health)
+	server.mux.HandleFunc("POST /v1/subscribers/subscribe", server.subscribe)
+	server.mux.HandleFunc("POST /v1/subscribers/unsubscribe", server.unsubscribe)
+	server.mux.HandleFunc("GET /v1/subscribers/{telegram_id}/status", server.status)
+	server.mux.HandleFunc("PATCH /v1/subscribers/{telegram_id}/preferences", server.preferences)
+	server.mux.HandleFunc("POST /v1/digests/preview", server.preview)
+}
+
+func (server *Server) health(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (server *Server) subscribe(writer http.ResponseWriter, request *http.Request) {
+	var body v1.SubscribeRequest
+	if !decodeJSON(writer, request, &body) {
+		return
+	}
+	if body.TelegramID <= 0 {
+		writeError(writer, http.StatusBadRequest, "telegram_id must be positive")
+		return
+	}
+
+	subscriber, err := server.store.GetSubscriber(request.Context(), body.TelegramID)
+	if errors.Is(err, sql.ErrNoRows) {
+		subscriber = storage.Subscriber{
+			TelegramID: body.TelegramID,
+			CreatedAt:  server.now(),
+		}
+	} else if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	if body.Username != "" || subscriber.Username == "" {
+		subscriber.Username = body.Username
+	}
+	subscriber.Active = true
+	if err := server.store.SaveSubscriber(request.Context(), subscriber); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+
+	if _, err := server.store.GetPreferences(request.Context(), body.TelegramID); errors.Is(err, sql.ErrNoRows) {
+		if err := server.store.SavePreferences(request.Context(), server.defaultPreferences(body.TelegramID)); err != nil {
+			writeInternalError(writer, err)
+			return
+		}
+	} else if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+
+	writeJSON(writer, http.StatusOK, v1.SubscribeResponse{Subscriber: contractSubscriber(subscriber)})
+}
+
+func (server *Server) unsubscribe(writer http.ResponseWriter, request *http.Request) {
+	var body v1.UnsubscribeRequest
+	if !decodeJSON(writer, request, &body) {
+		return
+	}
+	if body.TelegramID <= 0 {
+		writeError(writer, http.StatusBadRequest, "telegram_id must be positive")
+		return
+	}
+
+	subscriber, err := server.store.GetSubscriber(request.Context(), body.TelegramID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(writer, http.StatusNotFound, "subscriber not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	subscriber.Active = false
+	if err := server.store.SaveSubscriber(request.Context(), subscriber); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, v1.SubscribeResponse{Subscriber: contractSubscriber(subscriber)})
+}
+
+func (server *Server) status(writer http.ResponseWriter, request *http.Request) {
+	telegramID, ok := pathTelegramID(writer, request)
+	if !ok {
+		return
+	}
+	subscriber, err := server.store.GetSubscriber(request.Context(), telegramID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(writer, http.StatusOK, v1.SubscriberStatusResponse{
+			Subscriber:  v1.Subscriber{TelegramID: telegramID, Active: false},
+			Preferences: contractPreferences(server.defaultPreferences(telegramID)),
+		})
+		return
+	}
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	preferences, ok := server.preferencesState(writer, request, telegramID)
+	if !ok {
+		return
+	}
+	writeJSON(writer, http.StatusOK, v1.SubscriberStatusResponse{
+		Subscriber:  contractSubscriber(subscriber),
+		Preferences: contractPreferences(preferences),
+	})
+}
+
+func (server *Server) preferences(writer http.ResponseWriter, request *http.Request) {
+	telegramID, ok := pathTelegramID(writer, request)
+	if !ok {
+		return
+	}
+	var body v1.PreferencesPatchRequest
+	if !decodeJSON(writer, request, &body) {
+		return
+	}
+	if body.TelegramID != 0 && body.TelegramID != telegramID {
+		writeError(writer, http.StatusBadRequest, "telegram_id does not match request path")
+		return
+	}
+
+	_, current, ok := server.subscriberState(writer, request, telegramID)
+	if !ok {
+		return
+	}
+	patched := patchPreferences(current, body)
+	if err := validatePreferences(patched); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := server.store.SavePreferences(request.Context(), patched); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]v1.Preferences{
+		"preferences": contractPreferences(patched),
+	})
+}
+
+func (server *Server) preview(writer http.ResponseWriter, request *http.Request) {
+	var body v1.PreviewRequest
+	if !decodeJSON(writer, request, &body) {
+		return
+	}
+	if body.TelegramID <= 0 {
+		writeError(writer, http.StatusBadRequest, "telegram_id must be positive")
+		return
+	}
+	_, preferences, ok := server.subscriberState(writer, request, body.TelegramID)
+	if !ok {
+		return
+	}
+
+	timezone := preferences.Timezone
+	if body.Timezone != "" {
+		timezone = body.Timezone
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "timezone is invalid")
+		return
+	}
+	digestDate := body.Date
+	if digestDate == "" {
+		digestDate = server.now().In(location).Format("2006-01-02")
+	} else if _, err := time.Parse("2006-01-02", digestDate); err != nil {
+		writeError(writer, http.StatusBadRequest, "date must use YYYY-MM-DD format")
+		return
+	}
+
+	result, err := ingestion.NewService(ingestion.DefaultRegistry(), nil).Run(request.Context(), server.config.Sources)
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	response := (digest.Generator{}).PreviewResponse(digest.Request{
+		Signals:     result.Signals,
+		Preferences: preferences,
+		DigestDate:  digestDate,
+		Timezone:    timezone,
+	})
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) subscriberState(
+	writer http.ResponseWriter,
+	request *http.Request,
+	telegramID int64,
+) (storage.Subscriber, storage.Preferences, bool) {
+	subscriber, err := server.store.GetSubscriber(request.Context(), telegramID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(writer, http.StatusNotFound, "subscriber not found")
+		return storage.Subscriber{}, storage.Preferences{}, false
+	}
+	if err != nil {
+		writeInternalError(writer, err)
+		return storage.Subscriber{}, storage.Preferences{}, false
+	}
+	preferences, ok := server.preferencesState(writer, request, telegramID)
+	if !ok {
+		return storage.Subscriber{}, storage.Preferences{}, false
+	}
+	return subscriber, preferences, true
+}
+
+func (server *Server) preferencesState(
+	writer http.ResponseWriter,
+	request *http.Request,
+	telegramID int64,
+) (storage.Preferences, bool) {
+	preferences, err := server.store.GetPreferences(request.Context(), telegramID)
+	if errors.Is(err, sql.ErrNoRows) {
+		preferences = server.defaultPreferences(telegramID)
+		if err := server.store.SavePreferences(request.Context(), preferences); err != nil {
+			writeInternalError(writer, err)
+			return storage.Preferences{}, false
+		}
+	} else if err != nil {
+		writeInternalError(writer, err)
+		return storage.Preferences{}, false
+	}
+	return preferences, true
+}
+
+func (server *Server) defaultPreferences(telegramID int64) storage.Preferences {
+	return storage.Preferences{
+		TelegramID:   telegramID,
+		Regions:      []string{},
+		Categories:   []string{},
+		DeliveryTime: server.config.DeliveryTime,
+		Timezone:     server.config.Timezone,
+		MaxItems:     digest.DefaultItemLimit,
+	}
+}
+
+func patchPreferences(current storage.Preferences, patch v1.PreferencesPatchRequest) storage.Preferences {
+	fields := make(map[string]bool, len(patch.ReplaceFields))
+	for _, field := range patch.ReplaceFields {
+		fields[field] = true
+	}
+	if fields["regions"] || patch.Regions != nil {
+		current.Regions = append([]string(nil), patch.Regions...)
+	}
+	if fields["categories"] || patch.Categories != nil {
+		current.Categories = append([]string(nil), patch.Categories...)
+	}
+	if fields["delivery_time"] || patch.DeliveryTime != "" {
+		current.DeliveryTime = patch.DeliveryTime
+	}
+	if fields["timezone"] || patch.Timezone != "" {
+		current.Timezone = patch.Timezone
+	}
+	if fields["max_items"] || patch.MaxItems != 0 {
+		current.MaxItems = patch.MaxItems
+	}
+	return current
+}
+
+func validatePreferences(preferences storage.Preferences) error {
+	if _, err := time.Parse("15:04", preferences.DeliveryTime); err != nil {
+		return fmt.Errorf("delivery_time must use HH:MM format")
+	}
+	if _, err := time.LoadLocation(preferences.Timezone); err != nil {
+		return fmt.Errorf("timezone is invalid")
+	}
+	if preferences.MaxItems < 1 || preferences.MaxItems > 20 {
+		return fmt.Errorf("max_items must be between 1 and 20")
+	}
+	return nil
+}
+
+func pathTelegramID(writer http.ResponseWriter, request *http.Request) (int64, bool) {
+	raw := request.PathValue("telegram_id")
+	telegramID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || telegramID <= 0 {
+		writeError(writer, http.StatusBadRequest, "telegram_id must be positive")
+		return 0, false
+	}
+	return telegramID, true
+}
+
+func contractSubscriber(subscriber storage.Subscriber) v1.Subscriber {
+	return v1.Subscriber{
+		TelegramID: subscriber.TelegramID,
+		Username:   subscriber.Username,
+		Active:     subscriber.Active,
+	}
+}
+
+func contractPreferences(preferences storage.Preferences) v1.Preferences {
+	return v1.Preferences{
+		Regions:      append([]string{}, preferences.Regions...),
+		Categories:   append([]string{}, preferences.Categories...),
+		DeliveryTime: preferences.DeliveryTime,
+		Timezone:     preferences.Timezone,
+		MaxItems:     preferences.MaxItems,
+	}
+}
+
+func decodeJSON(writer http.ResponseWriter, request *http.Request, destination any) bool {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRequestBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid JSON request")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(writer, http.StatusBadRequest, "invalid JSON request")
+		return false
+	}
+	return true
+}
+
+func writeInternalError(writer http.ResponseWriter, _ error) {
+	writeError(writer, http.StatusInternalServerError, "internal server error")
+}
+
+func writeError(writer http.ResponseWriter, status int, message string) {
+	writeJSON(writer, status, map[string]string{"error": message})
+}
+
+func writeJSON(writer http.ResponseWriter, status int, payload any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(payload)
+}
