@@ -82,6 +82,15 @@ type DeliveryAttemptRequest struct {
 	ErrorMessage      string    `json:"error_message,omitempty"`
 }
 
+type DeliveryAttemptResponse struct {
+	DeliveryID    string     `json:"delivery_id"`
+	AttemptID     string     `json:"attempt_id"`
+	Status        string     `json:"status"`
+	Attempt       int        `json:"attempt"`
+	Duplicate     bool       `json:"duplicate"`
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+}
+
 type IngestionRunRequest struct {
 	SourceIDs []string `json:"source_ids,omitempty"`
 	DryRun    bool     `json:"dry_run"`

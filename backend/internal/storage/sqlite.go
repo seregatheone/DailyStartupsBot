@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,8 +29,11 @@ type Repository interface {
 	SaveDelivery(context.Context, Delivery) error
 	DeliveryExists(context.Context, int64, string) (bool, error)
 	GetDelivery(context.Context, string) (Delivery, error)
+	ListDueDeliveries(context.Context, time.Time) ([]Delivery, error)
 	SaveDeliveryAttempt(context.Context, DeliveryAttempt) error
 	ListDeliveryAttempts(context.Context, string) ([]DeliveryAttempt, error)
+	RecordDeliveryAttempt(context.Context, DeliveryAttempt, DeliveryTransition) (Delivery, bool, error)
+	GetHealthSnapshot(context.Context, int) (HealthSnapshot, error)
 	Close() error
 }
 
@@ -45,6 +49,9 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteRepository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	// A single connection avoids SQLITE_BUSY races between concurrent HTTP
+	// transitions while SQLite still serializes the short transactions.
+	db.SetMaxOpenConns(1)
 	repo := &SQLiteRepository{db: db}
 	if err := repo.Migrate(ctx); err != nil {
 		_ = db.Close()
@@ -62,6 +69,38 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 		if _, err := repo.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("apply sqlite migration: %w", err)
 		}
+	}
+	return repo.ensureDeliveryNextAttemptColumn(ctx)
+}
+
+func (repo *SQLiteRepository) ensureDeliveryNextAttemptColumn(ctx context.Context) error {
+	rows, err := repo.db.QueryContext(ctx, `PRAGMA table_info(delivery_queue)`)
+	if err != nil {
+		return fmt.Errorf("inspect delivery queue schema: %w", err)
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return fmt.Errorf("inspect delivery queue column: %w", err)
+		}
+		if name == "next_attempt_at" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect delivery queue schema: %w", err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := repo.db.ExecContext(ctx, `ALTER TABLE delivery_queue ADD COLUMN next_attempt_at TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add delivery retry time: %w", err)
 	}
 	return nil
 }
@@ -261,15 +300,16 @@ ORDER BY rank ASC
 
 func (repo *SQLiteRepository) SaveDelivery(ctx context.Context, delivery Delivery) error {
 	_, err := repo.db.ExecContext(ctx, `
-INSERT INTO delivery_queue (id, telegram_id, digest_id, digest_date, status, attempt, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO delivery_queue (id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	telegram_id = excluded.telegram_id,
 	digest_id = excluded.digest_id,
 	digest_date = excluded.digest_date,
 	status = excluded.status,
-	attempt = excluded.attempt
-`, delivery.ID, delivery.TelegramID, delivery.DigestID, delivery.DigestDate, delivery.Status, delivery.Attempt, formatTime(delivery.CreatedAt))
+	attempt = excluded.attempt,
+	next_attempt_at = excluded.next_attempt_at
+`, delivery.ID, delivery.TelegramID, delivery.DigestID, delivery.DigestDate, delivery.Status, delivery.Attempt, formatTime(delivery.NextAttemptAt), formatTime(delivery.CreatedAt))
 	return err
 }
 
@@ -284,16 +324,73 @@ WHERE telegram_id = ? AND digest_date = ?
 }
 
 func (repo *SQLiteRepository) GetDelivery(ctx context.Context, id string) (Delivery, error) {
-	var delivery Delivery
-	var createdAt string
-	err := repo.db.QueryRowContext(ctx, `
-SELECT id, telegram_id, digest_id, digest_date, status, attempt, created_at
+	return getDelivery(repo.db.QueryRowContext(ctx, `
+SELECT id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at
 FROM delivery_queue
 WHERE id = ?
-`, id).Scan(&delivery.ID, &delivery.TelegramID, &delivery.DigestID, &delivery.DigestDate, &delivery.Status, &delivery.Attempt, &createdAt)
+`, id))
+}
+
+func (repo *SQLiteRepository) ListDueDeliveries(ctx context.Context, now time.Time) ([]Delivery, error) {
+	rows, err := repo.db.QueryContext(ctx, `
+SELECT d.id, d.telegram_id, d.digest_id, d.digest_date, d.status, d.attempt, d.next_attempt_at, d.created_at
+FROM delivery_queue AS d
+JOIN subscribers AS s ON s.telegram_id = d.telegram_id
+WHERE s.active = 1
+	AND d.status IN ('due', 'retry')
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	deliveries := make([]Delivery, 0)
+	for rows.Next() {
+		delivery, err := getDelivery(rows)
+		if err != nil {
+			return nil, err
+		}
+		if !delivery.NextAttemptAt.IsZero() && delivery.NextAttemptAt.After(now) {
+			continue
+		}
+		deliveries = append(deliveries, delivery)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(deliveries, func(left, right int) bool {
+		if deliveries[left].CreatedAt.Equal(deliveries[right].CreatedAt) {
+			return deliveries[left].ID < deliveries[right].ID
+		}
+		return deliveries[left].CreatedAt.Before(deliveries[right].CreatedAt)
+	})
+	if len(deliveries) > 100 {
+		deliveries = deliveries[:100]
+	}
+	return deliveries, nil
+}
+
+type scanner interface {
+	Scan(...any) error
+}
+
+func getDelivery(row scanner) (Delivery, error) {
+	var delivery Delivery
+	var nextAttemptAt, createdAt string
+	err := row.Scan(
+		&delivery.ID,
+		&delivery.TelegramID,
+		&delivery.DigestID,
+		&delivery.DigestDate,
+		&delivery.Status,
+		&delivery.Attempt,
+		&nextAttemptAt,
+		&createdAt,
+	)
 	if err != nil {
 		return Delivery{}, err
 	}
+	delivery.NextAttemptAt = parseStoredTime(nextAttemptAt)
 	delivery.CreatedAt = parseStoredTime(createdAt)
 	return delivery, nil
 }
@@ -336,6 +433,284 @@ ORDER BY attempted_at ASC
 		attempts = append(attempts, attempt)
 	}
 	return attempts, rows.Err()
+}
+
+func (repo *SQLiteRepository) RecordDeliveryAttempt(
+	ctx context.Context,
+	attempt DeliveryAttempt,
+	transition DeliveryTransition,
+) (Delivery, bool, error) {
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	defer tx.Rollback()
+
+	var existingDeliveryID string
+	err = tx.QueryRowContext(ctx, `
+SELECT delivery_id
+FROM delivery_attempts
+WHERE id = ?
+`, attempt.ID).Scan(&existingDeliveryID)
+	switch {
+	case err == nil:
+		if existingDeliveryID != attempt.DeliveryID {
+			return Delivery{}, false, ErrDeliveryConflict
+		}
+		delivery, err := getDelivery(tx.QueryRowContext(ctx, `
+SELECT id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at
+FROM delivery_queue
+WHERE id = ?
+`, attempt.DeliveryID))
+		return delivery, true, err
+	case err != sql.ErrNoRows:
+		return Delivery{}, false, err
+	}
+
+	current, err := getDelivery(tx.QueryRowContext(ctx, `
+SELECT id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at
+FROM delivery_queue
+WHERE id = ?
+`, attempt.DeliveryID))
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if isTerminalDeliveryStatus(current.Status) {
+		return Delivery{}, false, ErrDeliveryTerminal
+	}
+	if current.Attempt != transition.ExpectedAttempt || transition.Attempt != transition.ExpectedAttempt+1 {
+		return Delivery{}, false, ErrDeliveryConflict
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO delivery_attempts (id, delivery_id, attempted_at, status, telegram_message_id, error_code, error_message)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+`, attempt.ID, attempt.DeliveryID, formatTime(attempt.AttemptedAt), attempt.Status, attempt.TelegramMessageID, attempt.ErrorCode, attempt.ErrorMessage); err != nil {
+		return Delivery{}, false, err
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE delivery_queue
+SET status = ?, attempt = ?, next_attempt_at = ?
+WHERE id = ? AND attempt = ? AND status NOT IN ('sent', 'failed', 'blocked')
+`, transition.Status, transition.Attempt, formatTime(transition.NextAttemptAt), attempt.DeliveryID, transition.ExpectedAttempt)
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	updatedRows, err := result.RowsAffected()
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if updatedRows != 1 {
+		return Delivery{}, false, ErrDeliveryConflict
+	}
+	if transition.DeactivateSubscriber {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE subscribers
+SET active = 0
+WHERE telegram_id = ?
+`, current.TelegramID); err != nil {
+			return Delivery{}, false, err
+		}
+	}
+
+	updated, err := getDelivery(tx.QueryRowContext(ctx, `
+SELECT id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at
+FROM delivery_queue
+WHERE id = ?
+`, attempt.DeliveryID))
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Delivery{}, false, err
+	}
+	return updated, false, nil
+}
+
+func isTerminalDeliveryStatus(status string) bool {
+	switch status {
+	case "sent", "failed", "blocked":
+		return true
+	default:
+		return false
+	}
+}
+
+func (repo *SQLiteRepository) GetHealthSnapshot(ctx context.Context, limit int) (HealthSnapshot, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	snapshot := HealthSnapshot{
+		Sources:        make([]HealthSourceState, 0),
+		RecentFailures: make([]HealthFailure, 0),
+	}
+	rows, err := repo.db.QueryContext(ctx, `
+SELECT source_id, status, last_ingestion_at
+FROM source_health
+ORDER BY source_id ASC
+`)
+	if err != nil {
+		return HealthSnapshot{}, err
+	}
+	for rows.Next() {
+		var source HealthSourceState
+		var lastIngestionAt string
+		if err := rows.Scan(&source.SourceID, &source.Status, &lastIngestionAt); err != nil {
+			rows.Close()
+			return HealthSnapshot{}, err
+		}
+		source.LastIngestionAt = parseStoredTime(lastIngestionAt)
+		if source.LastIngestionAt.After(snapshot.LastIngestionAt) {
+			snapshot.LastIngestionAt = source.LastIngestionAt
+		}
+		snapshot.Sources = append(snapshot.Sources, source)
+	}
+	if err := rows.Close(); err != nil {
+		return HealthSnapshot{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return HealthSnapshot{}, err
+	}
+
+	if err := repo.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM subscribers
+WHERE active = 1
+`).Scan(&snapshot.ActiveSubscriberCount); err != nil {
+		return HealthSnapshot{}, err
+	}
+	activityRows, err := repo.db.QueryContext(ctx, `
+	SELECT activity_at
+	FROM (
+	SELECT created_at AS activity_at FROM delivery_queue
+	UNION ALL
+	SELECT attempted_at AS activity_at FROM delivery_attempts
+)
+	WHERE activity_at != ''
+`)
+	if err != nil {
+		return HealthSnapshot{}, err
+	}
+	for activityRows.Next() {
+		var raw string
+		if err := activityRows.Scan(&raw); err != nil {
+			activityRows.Close()
+			return HealthSnapshot{}, err
+		}
+		activity := parseStoredTime(raw)
+		if activity.After(snapshot.LastDeliveryActivity) {
+			snapshot.LastDeliveryActivity = activity
+		}
+	}
+	if err := activityRows.Close(); err != nil {
+		return HealthSnapshot{}, err
+	}
+	if err := activityRows.Err(); err != nil {
+		return HealthSnapshot{}, err
+	}
+
+	if err := repo.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1 FROM source_health WHERE status != 'ok'
+	UNION ALL
+	SELECT 1 FROM delivery_queue WHERE status IN ('retry', 'failed', 'blocked')
+)
+`).Scan(&snapshot.Degraded); err != nil {
+		return HealthSnapshot{}, err
+	}
+
+	failures := make([]HealthFailure, 0)
+	sourceFailureRows, err := repo.db.QueryContext(ctx, `
+	SELECT last_ingestion_at AS occurred_at,
+		'source:' || source_id AS component,
+		'source is unhealthy' AS message
+	FROM source_health
+	WHERE status != 'ok'
+`)
+	if err != nil {
+		return HealthSnapshot{}, err
+	}
+	for sourceFailureRows.Next() {
+		var failure HealthFailure
+		var occurredAt string
+		if err := sourceFailureRows.Scan(&occurredAt, &failure.Component, &failure.Message); err != nil {
+			sourceFailureRows.Close()
+			return HealthSnapshot{}, err
+		}
+		failure.OccurredAt = parseStoredTime(occurredAt)
+		failures = append(failures, failure)
+	}
+	if err := sourceFailureRows.Close(); err != nil {
+		return HealthSnapshot{}, err
+	}
+	if err := sourceFailureRows.Err(); err != nil {
+		return HealthSnapshot{}, err
+	}
+
+	deliveryFailureRows, err := repo.db.QueryContext(ctx, `
+SELECT d.id, d.status, d.created_at, a.attempted_at
+FROM delivery_queue AS d
+LEFT JOIN delivery_attempts AS a ON a.delivery_id = d.id
+WHERE d.status IN ('retry', 'failed', 'blocked')
+`)
+	if err != nil {
+		return HealthSnapshot{}, err
+	}
+	deliveryFailures := make(map[string]HealthFailure)
+	for deliveryFailureRows.Next() {
+		var id, status, createdAt string
+		var attemptedAt sql.NullString
+		if err := deliveryFailureRows.Scan(&id, &status, &createdAt, &attemptedAt); err != nil {
+			deliveryFailureRows.Close()
+			return HealthSnapshot{}, err
+		}
+		occurredAt := parseStoredTime(createdAt)
+		if attemptedAt.Valid {
+			attemptTime := parseStoredTime(attemptedAt.String)
+			if attemptTime.After(occurredAt) {
+				occurredAt = attemptTime
+			}
+		}
+		failure := deliveryFailures[id]
+		if failure.Component == "" || occurredAt.After(failure.OccurredAt) {
+			message := "delivery permanently failed"
+			switch status {
+			case "retry":
+				message = "delivery is awaiting retry"
+			case "blocked":
+				message = "delivery was blocked"
+			}
+			deliveryFailures[id] = HealthFailure{
+				OccurredAt: occurredAt,
+				Component:  "delivery:" + id,
+				Message:    message,
+			}
+		}
+	}
+	if err := deliveryFailureRows.Close(); err != nil {
+		return HealthSnapshot{}, err
+	}
+	if err := deliveryFailureRows.Err(); err != nil {
+		return HealthSnapshot{}, err
+	}
+	for _, failure := range deliveryFailures {
+		failures = append(failures, failure)
+	}
+	sort.Slice(failures, func(left, right int) bool {
+		if failures[left].OccurredAt.Equal(failures[right].OccurredAt) {
+			return failures[left].Component < failures[right].Component
+		}
+		return failures[left].OccurredAt.After(failures[right].OccurredAt)
+	})
+	if len(failures) > limit {
+		failures = failures[:limit]
+	}
+	snapshot.RecentFailures = append(snapshot.RecentFailures, failures...)
+	return snapshot, nil
 }
 
 func ensureParentDir(path string) error {

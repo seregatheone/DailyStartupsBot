@@ -3,9 +3,11 @@ package digest
 import (
 	"fmt"
 	"html"
+	"sort"
 	"strings"
 
 	v1 "github.com/seregatheone/DailyStartupsBot/backend/internal/contracts/v1"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
 
 func (generator Generator) PreviewResponse(request Request) v1.PreviewResponse {
@@ -16,6 +18,36 @@ func (generator Generator) PreviewResponse(request Request) v1.PreviewResponse {
 
 func (generator Generator) DeliveryMessages(request Request) []v1.DigestMessage {
 	return generator.RenderMessages(generator.Generate(request))
+}
+
+// StoredDeliveryMessages renders the immutable digest snapshot referenced by a
+// queued delivery. Delivery workers must not regenerate the digest from current
+// source signals because that could change the message between retry attempts.
+func (generator Generator) StoredDeliveryMessages(run storage.DigestRun, storedItems []storage.DigestItem) []v1.DigestMessage {
+	items := append([]storage.DigestItem(nil), storedItems...)
+	sort.SliceStable(items, func(left, right int) bool {
+		return items[left].Rank < items[right].Rank
+	})
+
+	digestItems := make([]Item, 0, len(items))
+	for _, stored := range items {
+		sources := make([]SourceAttribution, 0, len(stored.SourceURLs))
+		for _, sourceURL := range stored.SourceURLs {
+			sources = append(sources, SourceAttribution{SourceID: sourceURL, SourceURL: sourceURL})
+		}
+		digestItems = append(digestItems, Item{
+			StartupName: stored.StartupName,
+			Description: stored.Summary,
+			Sources:     sources,
+		})
+	}
+
+	return generator.RenderMessages(Digest{
+		Date:     run.DigestDate,
+		Timezone: run.Timezone,
+		Items:    digestItems,
+		Empty:    len(digestItems) == 0,
+	})
 }
 
 func (generator Generator) RenderMessages(digest Digest) []v1.DigestMessage {
@@ -33,10 +65,20 @@ func (generator Generator) RenderMessages(digest Digest) []v1.DigestMessage {
 	}
 
 	header := fmt.Sprintf("<b>Daily startup digest</b> %s", html.EscapeString(digest.Date))
+	if len(header) > limit {
+		header = escapeAndTruncate("Daily startup digest "+digest.Date, limit)
+	}
+	maxBlockLength := limit - len(header) - 2
+	if maxBlockLength <= 0 {
+		return []v1.DigestMessage{{Sequence: 1, Text: header, ParseAs: "HTML"}}
+	}
 	var messages []string
 	current := header
 	for index, item := range digest.Items {
 		block := renderItem(index+1, item)
+		if len(block) > maxBlockLength {
+			block = renderOversizedItem(index+1, item, maxBlockLength)
+		}
 		if len(current)+2+len(block) > limit && current != header {
 			messages = append(messages, current)
 			current = header + "\n\n" + block
@@ -55,6 +97,37 @@ func (generator Generator) RenderMessages(digest Digest) []v1.DigestMessage {
 		})
 	}
 	return rendered
+}
+
+func renderOversizedItem(index int, item Item, limit int) string {
+	plain := fmt.Sprintf("%d. %s", index, item.StartupName)
+	if item.Description != "" {
+		plain += "\n" + item.Description
+	}
+	return escapeAndTruncate(plain, limit)
+}
+
+func escapeAndTruncate(value string, limit int) string {
+	escaped := html.EscapeString(value)
+	if len(escaped) <= limit {
+		return escaped
+	}
+	const ellipsis = "…"
+	if limit < len(ellipsis) {
+		return strings.Repeat(".", limit)
+	}
+
+	var builder strings.Builder
+	budget := limit - len(ellipsis)
+	for _, character := range value {
+		escapedCharacter := html.EscapeString(string(character))
+		if builder.Len()+len(escapedCharacter) > budget {
+			break
+		}
+		builder.WriteString(escapedCharacter)
+	}
+	builder.WriteString(ellipsis)
+	return builder.String()
 }
 
 func renderItem(index int, item Item) string {

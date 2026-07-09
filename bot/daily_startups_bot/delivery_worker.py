@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from daily_startups_bot.events import log_event
-from daily_startups_bot.telegram import TelegramAPIError, TelegramClient
+from daily_startups_bot.telegram import (
+    TelegramAPIError,
+    TelegramClient,
+    TelegramTransportError,
+)
 
 
 class DeliveryBackend(Protocol):
@@ -39,6 +43,7 @@ class DeliveryWorker:
         telegram_id = int(delivery["telegram_id"])
         messages = delivery.get("messages") or []
         sent_count = 0
+        last_message_id = ""
         for message in messages:
             try:
                 response = self.telegram.send_message(
@@ -59,7 +64,7 @@ class DeliveryWorker:
                     },
                 )
                 return sent_count
-            except RuntimeError as exc:
+            except (TelegramTransportError, RuntimeError) as exc:
                 log_event("telegram_send_result", delivery_id=delivery_id, status="failed")
                 self.backend.report_delivery_attempt(
                     delivery_id,
@@ -73,14 +78,15 @@ class DeliveryWorker:
 
             sent_count += 1
             log_event("telegram_send_result", delivery_id=delivery_id, status="success")
+            last_message_id = str(response.get("result", {}).get("message_id", ""))
+
+        if messages:
             self.backend.report_delivery_attempt(
                 delivery_id,
                 {
                     "attempted_at": self.now().isoformat(),
                     "status": "success",
-                    "telegram_message_id": str(
-                        response.get("result", {}).get("message_id", "")
-                    ),
+                    "telegram_message_id": last_message_id,
                 },
             )
         return sent_count

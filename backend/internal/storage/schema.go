@@ -57,6 +57,7 @@ var migrationStatements = []string{
 		digest_date TEXT NOT NULL,
 		status TEXT NOT NULL,
 		attempt INTEGER NOT NULL,
+		next_attempt_at TEXT NOT NULL DEFAULT '',
 		created_at TEXT NOT NULL,
 		UNIQUE (telegram_id, digest_date),
 		FOREIGN KEY (telegram_id) REFERENCES subscribers(telegram_id),
