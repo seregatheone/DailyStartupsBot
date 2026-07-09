@@ -29,6 +29,8 @@ Required backend settings:
 - `DAILY_STARTUPS_INGESTION_TIME`
 - `DAILY_STARTUPS_DELIVERY_TIME`
 - `DAILY_STARTUPS_DRY_RUN`
+- `DAILY_STARTUPS_INTERNAL_API_SECRET`
+- `DAILY_STARTUPS_SOURCES_JSON`
 
 Required bot settings:
 
@@ -40,14 +42,31 @@ Required bot settings:
 
 Do not commit real tokens, API keys, local databases, or generated runtime state.
 
-## Run
+## Run Locally
 
 ```bash
 make run-backend
 make run-bot
 ```
 
-The current scaffold starts each service entry point and prints a local startup message. Runtime configuration loading, Telegram polling, storage, and API behavior are implemented in later tasks.
+With `DAILY_STARTUPS_DRY_RUN=true`, `make run-backend` runs the sample public source, renders a digest, prints JSON structured logs, and skips Telegram send calls. `make run-bot` starts in dry-run mode without contacting Telegram.
+
+For a live Telegram test chat:
+
+1. Create a bot with BotFather and put the real token in `bot/.env` or export `DAILY_STARTUPS_TELEGRAM_TOKEN`.
+2. Set `DAILY_STARTUPS_DRY_RUN=false` for the bot.
+3. Start the backend, then the bot.
+4. In the test chat, verify `/start`, `/help`, `/subscribe`, `/status`, `/preview`, and `/unsubscribe`.
+
+Only run live mode with a private test bot token.
+
+## Operations
+
+Backend logs are JSON events for startup, ingestion cycles, digest generation, delivery queue dry-run decisions, health summary, failures, skipped sources, and rendered dry-run output.
+
+Bot logs are JSON events for startup, polling, command handling, sends, and delivery attempt results.
+
+The backend health summary contains source health, last ingestion time, subscriber count, last delivery run when available, and recent failures.
 
 ## Test
 

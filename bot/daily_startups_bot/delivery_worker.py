@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
+from daily_startups_bot.events import log_event
 from daily_startups_bot.telegram import TelegramAPIError, TelegramClient
 
 
@@ -26,9 +27,11 @@ class DeliveryWorker:
     def run_once(self) -> int:
         payload = self.backend.due_deliveries()
         deliveries = payload.get("deliveries") or []
+        log_event("delivery_worker_due", deliveries=len(deliveries))
         sent = 0
         for delivery in deliveries:
             sent += self._send_delivery(delivery)
+        log_event("delivery_worker_result", sent=sent)
         return sent
 
     def _send_delivery(self, delivery: dict[str, Any]) -> int:
@@ -45,6 +48,7 @@ class DeliveryWorker:
                 )
             except TelegramAPIError as exc:
                 status = "blocked" if exc.blocked else "failed"
+                log_event("telegram_send_result", delivery_id=delivery_id, status=status)
                 self.backend.report_delivery_attempt(
                     delivery_id,
                     {
@@ -56,6 +60,7 @@ class DeliveryWorker:
                 )
                 return sent_count
             except RuntimeError as exc:
+                log_event("telegram_send_result", delivery_id=delivery_id, status="failed")
                 self.backend.report_delivery_attempt(
                     delivery_id,
                     {
@@ -67,6 +72,7 @@ class DeliveryWorker:
                 return sent_count
 
             sent_count += 1
+            log_event("telegram_send_result", delivery_id=delivery_id, status="success")
             self.backend.report_delivery_attempt(
                 delivery_id,
                 {

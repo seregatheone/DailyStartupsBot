@@ -104,8 +104,8 @@ func (service Service) fetchSource(ctx context.Context, source RegisteredSource,
 				sourceResult.Message = appendMessage(sourceResult.Message, fmt.Sprintf("store signal: %v", err))
 				continue
 			}
+			sourceResult.Stored++
 		}
-		sourceResult.Stored++
 		result.Signals = append(result.Signals, signal)
 	}
 

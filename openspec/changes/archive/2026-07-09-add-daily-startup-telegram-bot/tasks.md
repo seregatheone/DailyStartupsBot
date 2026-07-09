@@ -62,10 +62,10 @@
 
 ## 7. Operations and Local Verification
 
-- [ ] 7.1 Implement structured logs for backend startup, bot startup, ingestion cycles, digest generation, deliveries, failures, and skipped sources
-- [ ] 7.2 Implement backend health summary with source health, last ingestion time, subscriber count, last delivery run, and recent delivery failures
-- [ ] 7.3 Implement dry-run mode that renders digest output without Telegram send calls
-- [ ] 7.4 Add README instructions for Python bot setup, Go backend setup, Telegram bot token setup, dry-run mode, and running tests
-- [ ] 7.5 Run full backend and bot test suites and fix failures
-- [ ] 7.6 Perform a local dry-run with sample source data and verify rendered digest output
-- [ ] 7.7 Perform an optional Telegram test-chat run with a real bot token and verify subscribe, status, preview, and delivery behavior
+- [x] 7.1 Implement structured logs for backend startup, bot startup, ingestion cycles, digest generation, deliveries, failures, and skipped sources
+- [x] 7.2 Implement backend health summary with source health, last ingestion time, subscriber count, last delivery run, and recent delivery failures
+- [x] 7.3 Implement dry-run mode that renders digest output without Telegram send calls
+- [x] 7.4 Add README instructions for Python bot setup, Go backend setup, Telegram bot token setup, dry-run mode, and running tests
+- [x] 7.5 Run full backend and bot test suites and fix failures
+- [x] 7.6 Perform a local dry-run with sample source data and verify rendered digest output
+- [x] 7.7 Perform an optional Telegram test-chat run with a real bot token and verify subscribe, status, preview, and delivery behavior
