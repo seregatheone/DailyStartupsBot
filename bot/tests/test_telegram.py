@@ -1,7 +1,7 @@
 import io
 import json
 import unittest
-from http.client import RemoteDisconnected
+from http.client import IncompleteRead, RemoteDisconnected
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
@@ -24,6 +24,14 @@ class FakeResponse:
 
     def read(self) -> bytes:
         return self.body
+
+
+class BrokenHTTPBody:
+    def read(self, *args: object) -> bytes:
+        raise IncompleteRead(b"partial", 100)
+
+    def close(self) -> None:
+        return None
 
 
 class TelegramHTTPClientTest(unittest.TestCase):
@@ -53,6 +61,48 @@ class TelegramHTTPClientTest(unittest.TestCase):
 
         with self.assertRaises(TelegramTransportError):
             self.client.send_message(42, "Digest")
+
+    @patch("daily_startups_bot.telegram.urlopen")
+    def test_rejects_invalid_api_error_shape(self, mocked_urlopen: object) -> None:
+        mocked_urlopen.return_value = FakeResponse(  # type: ignore[attr-defined]
+            b'{"ok":false,"error_code":"not-a-number","description":"private"}'
+        )
+
+        with self.assertRaises(TelegramTransportError) as raised:
+            self.client.send_message(42, "Digest")
+
+        self.assertNotIn("private", str(raised.exception))
+
+    @patch("daily_startups_bot.telegram.urlopen")
+    def test_requires_boolean_ok_field(self, mocked_urlopen: object) -> None:
+        mocked_urlopen.return_value = FakeResponse(  # type: ignore[attr-defined]
+            b'{"ok":"false","result":{"private":"value"}}'
+        )
+
+        with self.assertRaises(TelegramTransportError):
+            self.client.send_message(42, "Digest")
+
+    @patch("daily_startups_bot.telegram.urlopen")
+    def test_requires_structured_api_error_fields(self, mocked_urlopen: object) -> None:
+        mocked_urlopen.return_value = FakeResponse(b'{"ok":false}')  # type: ignore[attr-defined]
+
+        with self.assertRaises(TelegramTransportError):
+            self.client.send_message(42, "Digest")
+
+    @patch("daily_startups_bot.telegram.urlopen")
+    def test_normalizes_http_error_body_read_failure(self, mocked_urlopen: object) -> None:
+        mocked_urlopen.side_effect = HTTPError(  # type: ignore[attr-defined]
+            "https://api.telegram.org/redacted",
+            502,
+            "Bad Gateway",
+            {},
+            BrokenHTTPBody(),
+        )
+
+        with self.assertRaises(TelegramTransportError) as raised:
+            self.client.send_message(42, "Digest")
+
+        self.assertIn("is unavailable", str(raised.exception))
 
     @patch("daily_startups_bot.telegram.urlopen")
     def test_decodes_blocked_http_error(self, mocked_urlopen: object) -> None:
