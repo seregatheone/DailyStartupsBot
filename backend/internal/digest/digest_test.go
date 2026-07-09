@@ -120,6 +120,29 @@ func TestPreviewResponseReturnsEmptyState(t *testing.T) {
 	}
 }
 
+func TestStoredDeliveryMessagesTruncatesSingleOversizedItem(t *testing.T) {
+	generator := Generator{}
+	run := storage.DigestRun{DigestDate: "2026-07-10", Timezone: "UTC"}
+	items := []storage.DigestItem{{
+		StartupName: "Huge & <unsafe>",
+		Summary:     strings.Repeat("very long summary & details ", 400),
+		Rank:        1,
+		SourceURLs:  []string{"https://source.example/oversized"},
+	}}
+
+	messages := generator.StoredDeliveryMessages(run, items)
+
+	if len(messages) != 1 {
+		t.Fatalf("expected one bounded message, got %#v", messages)
+	}
+	if len(messages[0].Text) > DefaultMessageLength {
+		t.Fatalf("message exceeds Telegram limit: %d", len(messages[0].Text))
+	}
+	if !strings.Contains(messages[0].Text, "…") || strings.Contains(messages[0].Text, "<unsafe>") {
+		t.Fatalf("expected escaped truncated fallback: %s", messages[0].Text)
+	}
+}
+
 func signal(id, name, canonicalURL, sourceID, sourceURL, signalType string) storage.StartupSignal {
 	return storage.StartupSignal{
 		ID:           id,

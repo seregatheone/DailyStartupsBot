@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from http.client import HTTPException
 from typing import Any, Iterable, Protocol
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -23,6 +25,10 @@ class TelegramAPIError(RuntimeError):
         self.error_code = error_code
         self.description = description
         self.blocked = error_code == 403 and "blocked" in description.lower()
+
+
+class TelegramTransportError(RuntimeError):
+    """Sanitized Telegram transport or response failure safe for worker logs."""
 
 
 @dataclass(frozen=True)
@@ -52,13 +58,49 @@ class TelegramHTTPClient:
             data=data,
             method="POST",
         )
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                raw_body = response.read()
+        except HTTPError as exc:
+            try:
+                raw_body = exc.read()
+                try:
+                    body = self._decode_response(method, raw_body)
+                except TelegramTransportError:
+                    raise TelegramTransportError(
+                        f"Telegram API {method} failed with HTTP status {exc.code}"
+                    ) from exc
+                if not body.get("ok"):
+                    raise TelegramAPIError(
+                        int(body.get("error_code", exc.code)),
+                        str(body.get("description", f"Telegram API {method} failed")),
+                    ) from exc
+                raise TelegramTransportError(
+                    f"Telegram API {method} failed with HTTP status {exc.code}"
+                ) from exc
+            finally:
+                exc.close()
+        except (HTTPException, OSError) as exc:
+            raise TelegramTransportError(f"Telegram API {method} is unavailable") from exc
+
+        body = self._decode_response(method, raw_body)
         if not body.get("ok"):
             raise TelegramAPIError(
                 int(body.get("error_code", 0)),
                 str(body.get("description", f"Telegram API {method} failed")),
             )
+        return body
+
+    @staticmethod
+    def _decode_response(method: str, raw_body: bytes) -> dict[str, Any]:
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TelegramTransportError(
+                f"Telegram API {method} returned invalid JSON"
+            ) from exc
+        if not isinstance(body, dict):
+            raise TelegramTransportError(f"Telegram API {method} returned invalid JSON")
         return body
 
 

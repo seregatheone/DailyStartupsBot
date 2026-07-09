@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,22 +10,32 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/config"
 	v1 "github.com/seregatheone/DailyStartupsBot/backend/internal/contracts/v1"
+	deliverydomain "github.com/seregatheone/DailyStartupsBot/backend/internal/delivery"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/digest"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/ingestion"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
 
-const maxRequestBytes = 1 << 20
+const (
+	maxRequestBytes    = 1 << 20
+	healthFailureLimit = 10
+)
 
 type subscriberStore interface {
 	SaveSubscriber(context.Context, storage.Subscriber) error
 	GetSubscriber(context.Context, int64) (storage.Subscriber, error)
 	SavePreferences(context.Context, storage.Preferences) error
 	GetPreferences(context.Context, int64) (storage.Preferences, error)
+	GetDigestRun(context.Context, string) (storage.DigestRun, []storage.DigestItem, error)
+	GetDelivery(context.Context, string) (storage.Delivery, error)
+	ListDueDeliveries(context.Context, time.Time) ([]storage.Delivery, error)
+	RecordDeliveryAttempt(context.Context, storage.DeliveryAttempt, storage.DeliveryTransition) (storage.Delivery, bool, error)
+	GetHealthSnapshot(context.Context, int) (storage.HealthSnapshot, error)
 }
 
 type Server struct {
@@ -56,10 +67,52 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("GET /v1/subscribers/{telegram_id}/status", server.status)
 	server.mux.HandleFunc("PATCH /v1/subscribers/{telegram_id}/preferences", server.preferences)
 	server.mux.HandleFunc("POST /v1/digests/preview", server.preview)
+	server.mux.HandleFunc("GET /v1/deliveries/due", server.dueDeliveries)
+	server.mux.HandleFunc("POST /v1/deliveries/{delivery_id}/attempts", server.deliveryAttempt)
 }
 
-func (server *Server) health(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+func (server *Server) health(writer http.ResponseWriter, request *http.Request) {
+	snapshot, err := server.store.GetHealthSnapshot(request.Context(), healthFailureLimit)
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+
+	status := "ok"
+	if snapshot.Degraded {
+		status = "degraded"
+	}
+	response := v1.HealthResponse{
+		Status:          status,
+		SourceHealth:    make([]v1.SourceHealth, 0, len(snapshot.Sources)),
+		SubscriberCount: snapshot.ActiveSubscriberCount,
+		RecentFailures:  make([]v1.Failure, 0, len(snapshot.RecentFailures)),
+	}
+	if !snapshot.LastIngestionAt.IsZero() {
+		lastIngestionAt := snapshot.LastIngestionAt.UTC()
+		response.LastIngestionAt = &lastIngestionAt
+	}
+	if !snapshot.LastDeliveryActivity.IsZero() {
+		lastDeliveryActivity := snapshot.LastDeliveryActivity.UTC()
+		response.LastDeliveryRun = &lastDeliveryActivity
+	}
+	for _, source := range snapshot.Sources {
+		contractSource := v1.SourceHealth{SourceID: source.SourceID, Status: source.Status}
+		if !source.LastIngestionAt.IsZero() {
+			lastIngestionAt := source.LastIngestionAt.UTC()
+			contractSource.LastIngestionAt = &lastIngestionAt
+		}
+		response.SourceHealth = append(response.SourceHealth, contractSource)
+	}
+	for _, failure := range snapshot.RecentFailures {
+		response.RecentFailures = append(response.RecentFailures, v1.Failure{
+			OccurredAt: failure.OccurredAt.UTC(),
+			Component:  failure.Component,
+			Message:    failure.Message,
+		})
+	}
+
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (server *Server) subscribe(writer http.ResponseWriter, request *http.Request) {
@@ -233,6 +286,141 @@ func (server *Server) preview(writer http.ResponseWriter, request *http.Request)
 		Timezone:    timezone,
 	})
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) dueDeliveries(writer http.ResponseWriter, request *http.Request) {
+	queued, err := server.store.ListDueDeliveries(request.Context(), server.now())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+
+	response := v1.DueDeliveriesResponse{Deliveries: make([]v1.Delivery, 0, len(queued))}
+	for _, queuedDelivery := range queued {
+		run, items, err := server.store.GetDigestRun(request.Context(), queuedDelivery.DigestID)
+		if err != nil {
+			writeInternalError(writer, err)
+			return
+		}
+		messages := (digest.Generator{}).StoredDeliveryMessages(run, items)
+		if messages == nil {
+			messages = []v1.DigestMessage{}
+		}
+		response.Deliveries = append(response.Deliveries, v1.Delivery{
+			ID:         queuedDelivery.ID,
+			TelegramID: queuedDelivery.TelegramID,
+			DigestDate: queuedDelivery.DigestDate,
+			Messages:   messages,
+			Attempt:    queuedDelivery.Attempt,
+		})
+	}
+
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.Request) {
+	rawDeliveryID := request.PathValue("delivery_id")
+	deliveryID := strings.TrimSpace(rawDeliveryID)
+	if deliveryID == "" || deliveryID != rawDeliveryID || len(deliveryID) > 256 {
+		writeError(writer, http.StatusBadRequest, "delivery_id is invalid")
+		return
+	}
+
+	var body v1.DeliveryAttemptRequest
+	if !decodeJSON(writer, request, &body) {
+		return
+	}
+	if body.DeliveryID == "" || body.DeliveryID != deliveryID {
+		writeError(writer, http.StatusBadRequest, "delivery_id does not match request path")
+		return
+	}
+	if body.AttemptedAt.IsZero() {
+		writeError(writer, http.StatusBadRequest, "attempted_at is required")
+		return
+	}
+	switch body.Status {
+	case "success", "failed", "blocked":
+	default:
+		writeError(writer, http.StatusBadRequest, "status must be success, failed, or blocked")
+		return
+	}
+
+	current, err := server.store.GetDelivery(request.Context(), deliveryID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(writer, http.StatusNotFound, "delivery not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+
+	attemptedAt := body.AttemptedAt.UTC()
+	attempt := storage.DeliveryAttempt{
+		ID:                deliveryAttemptID(deliveryID, attemptedAt, body),
+		DeliveryID:        deliveryID,
+		AttemptedAt:       attemptedAt,
+		Status:            body.Status,
+		TelegramMessageID: body.TelegramMessageID,
+		ErrorCode:         body.ErrorCode,
+		ErrorMessage:      body.ErrorMessage,
+	}
+	decision := deliverydomain.DecideRetry(body.Status, current.Attempt, attemptedAt, deliverydomain.RetryPolicy{
+		MaxAttempts: 3,
+		Delay:       15 * time.Minute,
+	})
+	updated, duplicate, err := server.store.RecordDeliveryAttempt(request.Context(), attempt, storage.DeliveryTransition{
+		ExpectedAttempt:      current.Attempt,
+		Status:               decision.Status,
+		Attempt:              decision.Attempt,
+		NextAttemptAt:        decision.NextAttemptAt,
+		DeactivateSubscriber: decision.Inactive,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(writer, http.StatusNotFound, "delivery not found")
+		return
+	}
+	if errors.Is(err, storage.ErrDeliveryTerminal) || errors.Is(err, storage.ErrDeliveryConflict) {
+		writeError(writer, http.StatusConflict, "delivery state conflict")
+		return
+	}
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+
+	response := v1.DeliveryAttemptResponse{
+		DeliveryID: deliveryID,
+		AttemptID:  attempt.ID,
+		Status:     updated.Status,
+		Attempt:    updated.Attempt,
+		Duplicate:  duplicate,
+	}
+	if !updated.NextAttemptAt.IsZero() {
+		nextAttemptAt := updated.NextAttemptAt.UTC()
+		response.NextAttemptAt = &nextAttemptAt
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func deliveryAttemptID(deliveryID string, attemptedAt time.Time, request v1.DeliveryAttemptRequest) string {
+	canonical, _ := json.Marshal(struct {
+		DeliveryID        string `json:"delivery_id"`
+		AttemptedAt       string `json:"attempted_at"`
+		Status            string `json:"status"`
+		TelegramMessageID string `json:"telegram_message_id"`
+		ErrorCode         string `json:"error_code"`
+		ErrorMessage      string `json:"error_message"`
+	}{
+		DeliveryID:        deliveryID,
+		AttemptedAt:       attemptedAt.UTC().Format(time.RFC3339Nano),
+		Status:            request.Status,
+		TelegramMessageID: request.TelegramMessageID,
+		ErrorCode:         request.ErrorCode,
+		ErrorMessage:      request.ErrorMessage,
+	})
+	hash := sha256.Sum256(canonical)
+	return fmt.Sprintf("attempt-%x", hash[:])
 }
 
 func (server *Server) subscriberState(
