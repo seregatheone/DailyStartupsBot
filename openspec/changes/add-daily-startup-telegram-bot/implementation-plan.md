@@ -162,7 +162,7 @@ Create `backend/` Go module, `bot/` Python project, repo-level commands, sample 
 
 Merge boundary: one PR with both services scaffolded and test commands passing.
 
-Issue: `Завести монорепозиторий: Python bot + Go backend`
+Issue: `[TASK 1.1] Scaffold monorepo: Python bot + Go backend`
 
 ### Phase 2: Go Backend API and Storage
 
@@ -170,7 +170,7 @@ Implement Go configuration, secret redaction, versioned JSON contracts, SQLite m
 
 Merge boundary: one PR with backend API skeleton and durable state tests.
 
-Issue: `Реализовать Go backend: API, конфигурация и SQLite`
+Issue: `[TASK 1.2] Build Go backend API, config, and SQLite`
 
 ### Phase 3: Python Telegram Bot Core
 
@@ -178,7 +178,7 @@ Implement Python config, Telegram long polling, backend API client, command rout
 
 Merge boundary: one PR with fake Telegram/backend tests.
 
-Issue: `Реализовать Python Telegram bot: команды и подписки`
+Issue: `[TASK 1.3] Build Python Telegram bot commands and subscriptions`
 
 ### Phase 4: Go Source Ingestion
 
@@ -186,7 +186,7 @@ Implement Go source adapter contract, source registry, credential validation, in
 
 Merge boundary: one PR with backend fixture tests.
 
-Issue: `Реализовать Go ingestion: источники стартапов`
+Issue: `[TASK 1.4] Build Go startup source ingestion`
 
 ### Phase 5: Go Digest Pipeline
 
@@ -194,7 +194,7 @@ Implement backend deduplication, candidate grouping, ranking, summary rendering,
 
 Merge boundary: one PR with pure backend unit tests.
 
-Issue: `Реализовать Go digest pipeline`
+Issue: `[TASK 1.5] Build Go digest pipeline`
 
 ### Phase 6: Delivery Bridge
 
@@ -202,7 +202,7 @@ Implement backend ingestion/delivery scheduling, delivery queue, idempotency, re
 
 Merge boundary: one PR with fake clock, fake backend, and fake Telegram tests.
 
-Issue: `Связать расписание и доставку между Go backend и Python bot`
+Issue: `[TASK 1.6] Wire scheduling and delivery between Go backend and Python bot`
 
 ### Phase 7: Operations, Docs, and End-to-End Verification
 
@@ -210,7 +210,7 @@ Implement structured logs, backend health summary, dry-run mode, README instruct
 
 Merge boundary: one PR that makes the MVP operable.
 
-Issue: `Добавить ops, dry-run, docs и MVP-проверку`
+Issue: `[TASK 1.7] Add ops, dry-run, docs, and MVP verification`
 
 ## Acceptance Criteria
 
@@ -270,17 +270,17 @@ Issue: `Добавить ops, dry-run, docs и MVP-проверку`
 
 Epic:
 
-- `Реализовать DailyStartupsBot MVP: Python bot + Go backend`
+- `[EPIC 1] DailyStartupsBot MVP: Python bot + Go backend`
 
 Child issues:
 
-1. `Завести монорепозиторий: Python bot + Go backend`
-2. `Реализовать Go backend: API, конфигурация и SQLite`
-3. `Реализовать Python Telegram bot: команды и подписки`
-4. `Реализовать Go ingestion: источники стартапов`
-5. `Реализовать Go digest pipeline`
-6. `Связать расписание и доставку между Go backend и Python bot`
-7. `Добавить ops, dry-run, docs и MVP-проверку`
+1. `[TASK 1.1] Scaffold monorepo: Python bot + Go backend`
+2. `[TASK 1.2] Build Go backend API, config, and SQLite`
+3. `[TASK 1.3] Build Python Telegram bot commands and subscriptions`
+4. `[TASK 1.4] Build Go startup source ingestion`
+5. `[TASK 1.5] Build Go digest pipeline`
+6. `[TASK 1.6] Wire scheduling and delivery between Go backend and Python bot`
+7. `[TASK 1.7] Add ops, dry-run, docs, and MVP verification`
 
 Dependencies:
 
@@ -290,4 +290,3 @@ Dependencies:
 - 5 depends on 4.
 - 6 depends on 3 and 5.
 - 7 depends on 6.
-

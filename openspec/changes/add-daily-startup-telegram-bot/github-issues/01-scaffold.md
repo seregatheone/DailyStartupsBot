@@ -1,22 +1,35 @@
-Нужна базовая структура двух сервисов, чтобы дальше задачи могли идти независимыми PR.
+**Создать рабочую основу монорепозитория.** После этой задачи backend и bot можно развивать независимыми PR.
 
 Part of #1
 
+Priority: `P1`
+Status: `ready`
+Labels: `enhancement`
+
+**Зависимости:** нет.
+**Блокирует:** #3.
+**Spec:** `openspec/changes/add-daily-startup-telegram-bot/`
+
 ## Контекст
 
-Репозиторий пока содержит только OpenSpec/Codex scaffolding. Целевая архитектура: Python Telegram bot в `bot/` и Go backend в `backend/`.
+Репозиторий содержит OpenSpec/Codex scaffolding. Целевая структура: `backend/` для Go service и `bot/` для Python Telegram bot.
 
 ## Задача
 
-Завести monorepo scaffold, базовые entry points, тестовые команды, sample config и README-заготовку без секретов.
+- Создать `backend/` Go module с entry point.
+- Создать `bot/` Python project с Telegram bot entry point.
+- Добавить repo-level команды для backend tests, bot tests, full test и local run.
+- Добавить sample config/env файлы без секретов.
+- Добавить README-заготовку с командами локального запуска.
 
 ## Acceptance criteria
 
-- [ ] Создан `backend/` Go module с entry point и baseline test.
-- [ ] Создан `bot/` Python project с Telegram bot entry point и baseline test.
-- [ ] Есть repo-level команды: `make test`, `make test-backend`, `make test-bot`, `make run-backend`, `make run-bot`.
-- [ ] Добавлены sample config/env файлы без секретов.
-- [ ] README описывает минимальный local scaffold и команды.
+Проверить repo scaffold:
+- [ ] `backend/` содержит Go module, entry point и baseline test.
+- [ ] `bot/` содержит Python project, entry point и baseline test.
+- [ ] Есть `make test`, `make test-backend`, `make test-bot`, `make run-backend`, `make run-bot`.
+- [ ] Sample config/env не содержит секретов.
+- [ ] README описывает минимальный local run.
 - [ ] Backend baseline test проходит.
 - [ ] Bot baseline test проходит.
 

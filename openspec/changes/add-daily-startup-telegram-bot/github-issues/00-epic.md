@@ -1,42 +1,56 @@
 ## Цель
 
-Реализовать MVP DailyStartupsBot: Python Telegram bot + Go backend, который собирает startup-сигналы, формирует ежедневный digest и доставляет его подписчикам в Telegram.
+MVP DailyStartupsBot: Python Telegram bot + Go backend собирает startup-сигналы, формирует ежедневный digest и доставляет его подписчикам в Telegram.
 
-## Решение
+## Зависит от
 
-- `bot/`: Python Telegram bot, long polling, команды, preview, отправка сообщений.
-- `backend/`: Go service, SQLite, source ingestion, digest pipeline, delivery queue, health.
-- Связь сервисов: versioned internal HTTP API.
-- Источники: только через разрешённые access methods; paid/restricted sources выключены без credentials.
+Нет.
+
+## Текущее состояние
+
+- Priority: `P1`
+- Status: `ready`
+- Labels: `enhancement`
+- Spec: `openspec/changes/add-daily-startup-telegram-bot/`
+- План: `openspec/changes/add-daily-startup-telegram-bot/implementation-plan.md`
+- В репозитории пока OpenSpec/Codex scaffolding, application code ещё не создан.
+
+## Зафиксированные решения
+
+1. Telegram bot реализуется на Python в `bot/`.
+2. Backend реализуется на Go в `backend/`.
+3. Связь сервисов идёт через versioned internal HTTP API.
+4. Go backend владеет SQLite, source ingestion, digest pipeline, delivery queue и health.
+5. Python bot владеет Telegram long polling, commands и sendMessage.
 
 ## Дочерние issues
 
 ### Foundation
 
-- [ ] #2 Завести монорепозиторий: Python bot + Go backend
-- [ ] #3 Реализовать Go backend: API, конфигурация и SQLite
+- [ ] #2 - [TASK 1.1] Scaffold monorepo: Python bot + Go backend
+- [ ] #3 - [TASK 1.2] Build Go backend API, config, and SQLite
 
-### Product Flow
+### Main Track
 
-- [ ] #4 Реализовать Python Telegram bot: команды и подписки
-- [ ] #5 Реализовать Go ingestion: источники стартапов
-- [ ] #6 Реализовать Go digest pipeline
+- [ ] #4 - [TASK 1.3] Build Python Telegram bot commands and subscriptions
+- [ ] #5 - [TASK 1.4] Build Go startup source ingestion
+- [ ] #6 - [TASK 1.5] Build Go digest pipeline
 
-### Delivery and Ops
+### Delivery / Ops
 
-- [ ] #7 Связать расписание и доставку между Go backend и Python bot
-- [ ] #8 Добавить ops, dry-run, docs и MVP-проверку
+- [ ] #7 - [TASK 1.6] Wire scheduling and delivery between Go backend and Python bot
+- [ ] #8 - [TASK 1.7] Add ops, dry-run, docs, and MVP verification
 
 ## Acceptance criteria
 
 - [ ] Telegram bot реализован на Python.
 - [ ] Backend реализован на Go.
 - [ ] `make test` проходит.
-- [ ] Backend tests проходят через `go test ./...`.
-- [ ] Bot tests проходят через Python test runner.
+- [ ] `go test ./...` проходит в `backend/`.
+- [ ] Python tests проходят в `bot/`.
 - [ ] Dry-run рендерит digest без отправки в Telegram.
 - [ ] `/start`, `/help`, `/subscribe`, `/unsubscribe`, `/status`, `/preview` работают в test chat.
-- [ ] Доставка идемпотентна по subscriber + digest date.
-- [ ] Source failures видны в backend health/logs и не ломают остальные источники.
+- [ ] Delivery идемпотентна по subscriber + digest date.
+- [ ] Source failures видны в backend health/logs и не ломают остальные sources.
 - [ ] Secrets не попадают в logs.
 
