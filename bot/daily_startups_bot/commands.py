@@ -98,10 +98,10 @@ class CommandRouter:
             return HELP_TEXT
         if command == "/subscribe":
             self.backend.subscribe(telegram_id, username)
-            return "Subscribed. You will receive the daily startup digest."
+            return "Подписка оформлена. Вы будете получать ежедневный дайджест стартапов."
         if command == "/unsubscribe":
             self.backend.unsubscribe(telegram_id)
-            return "Unsubscribed. Daily delivery is stopped."
+            return "Подписка отключена. Ежедневная доставка остановлена."
         if command == "/status":
             return _render_status(self.backend.status(telegram_id))
         if command == "/preview":
@@ -110,24 +110,26 @@ class CommandRouter:
             try:
                 preferences = parse_preferences(text)
             except PreferenceParseError as exc:
-                return f"Could not update preferences: {exc}"
+                return f"Не удалось обновить настройки: {exc}"
             self.backend.update_preferences(telegram_id, preferences)
-            return "Preferences updated."
-        return "Unknown command. Send /help for supported commands."
+            return "Настройки обновлены."
+        return "Неизвестная команда. Отправьте /help, чтобы увидеть список команд."
 
 
 START_TEXT = (
-    "DailyStartupsBot sends a concise daily startup digest. "
-    "Use /subscribe to start and /preferences to tune regions, categories, time, timezone, and item count."
+    "DailyStartupsBot присылает краткий ежедневный дайджест стартапов. "
+    "Отправьте /subscribe, чтобы подписаться, и /preferences, чтобы настроить регионы, "
+    "категории, время, часовой пояс и количество элементов."
 )
 
 HELP_TEXT = (
-    "Commands: /start, /help, /subscribe, /unsubscribe, /status, /preview, "
-    "/preferences regions=EU categories=AI time=09:00 timezone=Europe/Moscow max=7"
+    "Команды: /start, /help, /subscribe, /unsubscribe, /status, /preview.\n"
+    "Настройки: /preferences regions=EU categories=AI time=09:00 "
+    "timezone=Europe/Moscow max=7"
 )
 
 BACKEND_UNAVAILABLE_TEXT = (
-    "The startup service is temporarily unavailable. Please try again in a minute."
+    "Сервис стартапов временно недоступен. Пожалуйста, повторите попытку через минуту."
 )
 
 _LOGGABLE_COMMANDS = {
@@ -150,23 +152,23 @@ def _log_command_name(text: str) -> str:
 def _render_status(payload: dict[str, Any]) -> str:
     subscriber = payload.get("subscriber", {})
     preferences = payload.get("preferences", {})
-    active = "active" if subscriber.get("active") else "inactive"
-    regions = ", ".join(preferences.get("regions") or ["all"])
-    categories = ", ".join(preferences.get("categories") or ["all"])
-    delivery_time = preferences.get("delivery_time", "default")
-    timezone = preferences.get("timezone", "default")
-    max_items = preferences.get("max_items", "default")
+    active = "активна" if subscriber.get("active") else "неактивна"
+    regions = ", ".join(preferences.get("regions") or ["все"])
+    categories = ", ".join(preferences.get("categories") or ["все"])
+    delivery_time = preferences.get("delivery_time", "по умолчанию")
+    timezone = preferences.get("timezone", "по умолчанию")
+    max_items = preferences.get("max_items", "по умолчанию")
     return (
-        f"Subscription: {active}\n"
-        f"Regions: {regions}\n"
-        f"Categories: {categories}\n"
-        f"Delivery: {delivery_time} {timezone}\n"
-        f"Max items: {max_items}"
+        f"Подписка: {active}\n"
+        f"Регионы: {regions}\n"
+        f"Категории: {categories}\n"
+        f"Доставка: {delivery_time} {timezone}\n"
+        f"Максимум элементов: {max_items}"
     )
 
 
 def _render_preview(payload: dict[str, Any]) -> str:
     messages = payload.get("messages") or []
     if not messages:
-        return "No preview is available yet."
+        return "Предпросмотр пока недоступен."
     return "\n\n".join(str(message.get("text", "")) for message in messages if message.get("text"))

@@ -20,12 +20,32 @@ class PreferencesTest(unittest.TestCase):
         )
 
     def test_rejects_bad_time(self) -> None:
-        with self.assertRaisesRegex(PreferenceParseError, "HH:MM"):
+        with self.assertRaisesRegex(PreferenceParseError, "ЧЧ:ММ"):
             parse_preferences("/preferences time=25:99")
 
     def test_rejects_bad_timezone(self) -> None:
-        with self.assertRaisesRegex(PreferenceParseError, "Unknown timezone"):
+        with self.assertRaisesRegex(PreferenceParseError, "Неизвестный часовой пояс"):
             parse_preferences("/preferences timezone=Nowhere/Nope")
+
+        for value in ["", "/foo", "../UTC", "Europe//Moscow"]:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    PreferenceParseError, "Неизвестный часовой пояс"
+                ):
+                    parse_preferences(f"/preferences timezone={value}")
+
+    def test_every_validation_error_contains_russian_example(self) -> None:
+        invalid_commands = [
+            "/preferences",
+            "/preferences invalid",
+            "/preferences max=nope",
+            "/preferences unknown=value",
+        ]
+        for command in invalid_commands:
+            with self.subTest(command=command):
+                with self.assertRaises(PreferenceParseError) as raised:
+                    parse_preferences(command)
+                self.assertIn("Пример: /preferences", str(raised.exception))
 
 
 if __name__ == "__main__":
