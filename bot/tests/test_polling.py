@@ -101,8 +101,8 @@ class PollingTest(unittest.TestCase):
         self.assertEqual(handled, 2)
         self.assertEqual(poller.offset, 102)
         self.assertEqual(len(telegram.sent), 2)
-        self.assertIn("temporarily unavailable", telegram.sent[0][1])
-        self.assertIn("Use /preferences", telegram.sent[1][1])
+        self.assertIn("временно недоступен", telegram.sent[0][1])
+        self.assertIn("Пример: /preferences", telegram.sent[1][1])
 
     def test_transport_send_failure_is_dropped_and_batch_advances(self) -> None:
         secret = "token=secret-token reply=private-message"
@@ -123,7 +123,7 @@ class PollingTest(unittest.TestCase):
         self.assertEqual(handled, 2)
         self.assertEqual(poller.offset, 102)
         self.assertEqual(len(telegram.sent), 1)
-        self.assertIn("Commands:", telegram.sent[0][1])
+        self.assertIn("Команды:", telegram.sent[0][1])
         self.assertIn('"failure_kind": "transport"', logs.getvalue())
         self.assertIn('"policy": "drop_no_retry"', logs.getvalue())
         self.assertIn('"command": "unknown"', logs.getvalue())

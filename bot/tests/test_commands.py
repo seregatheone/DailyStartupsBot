@@ -58,6 +58,14 @@ class FailingBackend(FakeBackend):
         raise BackendError("backend is unavailable")
 
 
+class EmptyBackend(FakeBackend):
+    def status(self, telegram_id: int) -> dict[str, Any]:
+        return {"subscriber": {"telegram_id": telegram_id, "active": False}, "preferences": {}}
+
+    def preview(self, telegram_id: int) -> dict[str, Any]:
+        return {"messages": [], "empty": True}
+
+
 def update(text: str) -> dict[str, Any]:
     return {
         "update_id": 10,
@@ -80,7 +88,7 @@ class CommandsTest(unittest.TestCase):
         self.router.handle_update(update("/help"))
 
         self.assertEqual(self.backend.calls, [])
-        self.assertIn("daily startup digest", self.telegram.sent[0][1])
+        self.assertIn("ежедневный дайджест стартапов", self.telegram.sent[0][1])
         self.assertIn("/subscribe", self.telegram.sent[1][1])
 
     def test_subscription_commands_delegate_to_backend(self) -> None:
@@ -91,12 +99,14 @@ class CommandsTest(unittest.TestCase):
             self.backend.calls,
             [("subscribe", 42, "sergey"), ("unsubscribe", 42)],
         )
+        self.assertIn("Подписка оформлена", self.telegram.sent[0][1])
+        self.assertIn("Подписка отключена", self.telegram.sent[1][1])
 
     def test_status_and_preview_render_backend_response(self) -> None:
         self.router.handle_update(update("/status"))
         self.router.handle_update(update("/preview"))
 
-        self.assertIn("Subscription: active", self.telegram.sent[0][1])
+        self.assertIn("Подписка: активна", self.telegram.sent[0][1])
         self.assertIn("Acme AI", self.telegram.sent[1][1])
 
     def test_preferences_delegate_valid_payload(self) -> None:
@@ -109,6 +119,26 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(telegram_id, 42)
         self.assertEqual(preferences["regions"], ["EU"])
         self.assertEqual(preferences["max_items"], 5)
+        self.assertEqual(self.telegram.sent[0][1], "Настройки обновлены.")
+
+    def test_unknown_command_uses_russian_help(self) -> None:
+        self.router.handle_update(update("/unknown"))
+
+        self.assertIn("Неизвестная команда", self.telegram.sent[0][1])
+        self.assertIn("/help", self.telegram.sent[0][1])
+
+    def test_empty_status_and_preview_use_russian_defaults(self) -> None:
+        router = CommandRouter(EmptyBackend(), self.telegram)
+
+        router.handle_update(update("/status"))
+        router.handle_update(update("/preview"))
+
+        status = self.telegram.sent[0][1]
+        self.assertIn("Подписка: неактивна", status)
+        self.assertIn("Регионы: все", status)
+        self.assertIn("Категории: все", status)
+        self.assertIn("по умолчанию", status)
+        self.assertEqual(self.telegram.sent[1][1], "Предпросмотр пока недоступен.")
 
     def test_backend_failure_replies_without_crashing_command_processing(self) -> None:
         router = CommandRouter(FailingBackend(), self.telegram)
@@ -116,8 +146,8 @@ class CommandsTest(unittest.TestCase):
         self.assertTrue(router.handle_update(update("/subscribe")))
         self.assertTrue(router.handle_update(update("/preferences")))
 
-        self.assertIn("temporarily unavailable", self.telegram.sent[0][1])
-        self.assertIn("Use /preferences", self.telegram.sent[1][1])
+        self.assertIn("временно недоступен", self.telegram.sent[0][1])
+        self.assertIn("Пример: /preferences", self.telegram.sent[1][1])
 
 
 if __name__ == "__main__":
