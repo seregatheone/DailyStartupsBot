@@ -28,14 +28,14 @@
 
 ## 4. Go Source Ingestion
 
-- [ ] 4.1 Verify allowed access methods for the initial MVP sources and encode them as backend source configuration
-- [ ] 4.2 Implement the Go `SourceAdapter` contract with source metadata, credential requirements, fetch cadence, rate limits, and health result
-- [ ] 4.3 Implement source registry loading that enables active configured sources and skips disabled sources
-- [ ] 4.4 Implement credential validation that blocks restricted sources without required credentials
-- [ ] 4.5 Implement at least one public-source adapter suitable for local dry-run testing
-- [ ] 4.6 Implement normalization from source records into the shared backend `StartupSignal` model
-- [ ] 4.7 Implement source failure isolation and health updates per fetch cycle
-- [ ] 4.8 Add Go ingestion tests for enabled sources, disabled sources, missing credentials, successful normalization, and source failure isolation
+- [x] 4.1 Verify allowed access methods for the initial MVP sources and encode them as backend source configuration
+- [x] 4.2 Implement the Go `SourceAdapter` contract with source metadata, credential requirements, fetch cadence, rate limits, and health result
+- [x] 4.3 Implement source registry loading that enables active configured sources and skips disabled sources
+- [x] 4.4 Implement credential validation that blocks restricted sources without required credentials
+- [x] 4.5 Implement at least one public-source adapter suitable for local dry-run testing
+- [x] 4.6 Implement normalization from source records into the shared backend `StartupSignal` model
+- [x] 4.7 Implement source failure isolation and health updates per fetch cycle
+- [x] 4.8 Add Go ingestion tests for enabled sources, disabled sources, missing credentials, successful normalization, and source failure isolation
 
 ## 5. Go Digest Pipeline
 
