@@ -67,7 +67,7 @@ Responsibilities:
 
 Alternatives considered:
 
-- Kotlin/JVM was previously proposed, but it conflicts with the corrected requirement.
+- A single-service backend design was previously considered, but it conflicts with the corrected two-service requirement.
 - Python backend would reduce cross-language integration, but it conflicts with the corrected requirement.
 
 ### Internal HTTP API Between Services
