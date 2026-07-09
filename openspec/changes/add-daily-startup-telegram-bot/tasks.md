@@ -39,14 +39,14 @@
 
 ## 5. Go Digest Pipeline
 
-- [ ] 5.1 Implement conservative deduplication keys based on canonical URL, normalized startup name, source URL, region, and published date
-- [ ] 5.2 Implement grouping of duplicate startup signals into digest candidate items with preserved source attribution
-- [ ] 5.3 Implement ranking by recency, source priority, signal type, funding strength, category match, and subscriber preferences
-- [ ] 5.4 Implement deterministic summary rendering that omits unknown fields instead of guessing
-- [ ] 5.5 Implement Telegram-safe digest rendering with item limits, message splitting, and source links
-- [ ] 5.6 Implement empty-state digest rendering when no matching signals exist
-- [ ] 5.7 Expose preview and due-delivery digest messages through the backend API
-- [ ] 5.8 Add Go digest tests for ranking, deduplication, missing fields, message length handling, empty state, and source attribution
+- [x] 5.1 Implement conservative deduplication keys based on canonical URL, normalized startup name, source URL, region, and published date
+- [x] 5.2 Implement grouping of duplicate startup signals into digest candidate items with preserved source attribution
+- [x] 5.3 Implement ranking by recency, source priority, signal type, funding strength, category match, and subscriber preferences
+- [x] 5.4 Implement deterministic summary rendering that omits unknown fields instead of guessing
+- [x] 5.5 Implement Telegram-safe digest rendering with item limits, message splitting, and source links
+- [x] 5.6 Implement empty-state digest rendering when no matching signals exist
+- [x] 5.7 Expose preview and due-delivery digest messages through the backend API
+- [x] 5.8 Add Go digest tests for ranking, deduplication, missing fields, message length handling, empty state, and source attribution
 
 ## 6. Scheduling and Delivery Bridge
 
