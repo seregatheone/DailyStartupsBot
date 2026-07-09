@@ -6,7 +6,12 @@ from typing import Any, Protocol
 from daily_startups_bot.backend import BackendError
 from daily_startups_bot.events import log_event
 from daily_startups_bot.preferences import PreferenceParseError, parse_preferences
-from daily_startups_bot.telegram import TelegramClient, extract_message
+from daily_startups_bot.telegram import (
+    TelegramAPIError,
+    TelegramClient,
+    TelegramTransportError,
+    extract_message,
+)
 
 
 class BackendAPI(Protocol):
@@ -43,7 +48,7 @@ class CommandRouter:
         telegram_id = int(user.get("id", chat_id))
         username = str(user.get("username", ""))
 
-        command = text.split(maxsplit=1)[0]
+        command = _log_command_name(text)
         try:
             response = self.handle_command(text, telegram_id, username)
         except BackendError as exc:
@@ -54,8 +59,35 @@ class CommandRouter:
                 error=str(exc),
             )
             response = BACKEND_UNAVAILABLE_TEXT
-        self.telegram.send_message(chat_id, response)
-        log_event("telegram_command", command=command, telegram_id=telegram_id)
+        reply_status = "sent"
+        try:
+            self.telegram.send_message(chat_id, response)
+        except TelegramAPIError as exc:
+            reply_status = "dropped"
+            log_event(
+                "telegram_command_reply_failure",
+                command=command,
+                telegram_id=telegram_id,
+                failure_kind="api",
+                error_code=exc.error_code,
+                blocked=exc.blocked,
+                policy="drop_no_retry",
+            )
+        except TelegramTransportError:
+            reply_status = "dropped"
+            log_event(
+                "telegram_command_reply_failure",
+                command=command,
+                telegram_id=telegram_id,
+                failure_kind="transport",
+                policy="drop_no_retry",
+            )
+        log_event(
+            "telegram_command",
+            command=command,
+            telegram_id=telegram_id,
+            reply_status=reply_status,
+        )
         return True
 
     def handle_command(self, text: str, telegram_id: int, username: str = "") -> str:
@@ -97,6 +129,22 @@ HELP_TEXT = (
 BACKEND_UNAVAILABLE_TEXT = (
     "The startup service is temporarily unavailable. Please try again in a minute."
 )
+
+_LOGGABLE_COMMANDS = {
+    "/start",
+    "/help",
+    "/subscribe",
+    "/unsubscribe",
+    "/status",
+    "/preview",
+    "/preferences",
+    "/prefs",
+}
+
+
+def _log_command_name(text: str) -> str:
+    raw = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+    return raw if raw in _LOGGABLE_COMMANDS else "unknown"
 
 
 def _render_status(payload: dict[str, Any]) -> str:

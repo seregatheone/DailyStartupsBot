@@ -71,6 +71,8 @@ Backend logs are JSON events for startup, ingestion cycles, digest generation, d
 
 Bot logs are JSON events for startup, polling, command handling, sends, and delivery attempt results.
 
+Command replies use an at-most-once policy. If Telegram rejects a reply or the send transport fails, the bot records safe structured metadata, drops that reply without automatic retry, continues later updates in the batch, and advances the polling offset. This avoids duplicate replies and poison-update replay; logs do not include reply text, bot tokens, or raw Telegram error descriptions.
+
 The backend health summary contains source health, last ingestion time, active subscriber count, last delivery activity when available, and bounded recent failure summaries. It reports `status: "degraded"` when a source is unhealthy or a delivery is retrying, permanently failed, or blocked. Raw stored errors, Telegram messages, credentials, and response bodies are not returned.
 
 ### Internal delivery API

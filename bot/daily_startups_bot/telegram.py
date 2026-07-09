@@ -63,18 +63,20 @@ class TelegramHTTPClient:
                 raw_body = response.read()
         except HTTPError as exc:
             try:
-                raw_body = exc.read()
+                try:
+                    raw_body = exc.read()
+                except (HTTPException, OSError) as read_exc:
+                    raise TelegramTransportError(
+                        f"Telegram API {method} is unavailable"
+                    ) from read_exc
                 try:
                     body = self._decode_response(method, raw_body)
                 except TelegramTransportError:
                     raise TelegramTransportError(
                         f"Telegram API {method} failed with HTTP status {exc.code}"
                     ) from exc
-                if not body.get("ok"):
-                    raise TelegramAPIError(
-                        int(body.get("error_code", exc.code)),
-                        str(body.get("description", f"Telegram API {method} failed")),
-                    ) from exc
+                if not self._response_ok(method, body):
+                    raise self._api_error(method, body) from exc
                 raise TelegramTransportError(
                     f"Telegram API {method} failed with HTTP status {exc.code}"
                 ) from exc
@@ -84,11 +86,8 @@ class TelegramHTTPClient:
             raise TelegramTransportError(f"Telegram API {method} is unavailable") from exc
 
         body = self._decode_response(method, raw_body)
-        if not body.get("ok"):
-            raise TelegramAPIError(
-                int(body.get("error_code", 0)),
-                str(body.get("description", f"Telegram API {method} failed")),
-            )
+        if not self._response_ok(method, body):
+            raise self._api_error(method, body)
         return body
 
     @staticmethod
@@ -102,6 +101,30 @@ class TelegramHTTPClient:
         if not isinstance(body, dict):
             raise TelegramTransportError(f"Telegram API {method} returned invalid JSON")
         return body
+
+    @staticmethod
+    def _response_ok(method: str, body: dict[str, Any]) -> bool:
+        ok = body.get("ok")
+        if not isinstance(ok, bool):
+            raise TelegramTransportError(
+                f"Telegram API {method} returned an invalid response"
+            )
+        return ok
+
+    @staticmethod
+    def _api_error(method: str, body: dict[str, Any]) -> TelegramAPIError:
+        error_code = body.get("error_code")
+        description = body.get("description")
+        if (
+            not isinstance(error_code, int)
+            or isinstance(error_code, bool)
+            or not isinstance(description, str)
+            or not description
+        ):
+            raise TelegramTransportError(
+                f"Telegram API {method} returned an invalid response"
+            )
+        return TelegramAPIError(error_code, description)
 
 
 def extract_message(update: dict[str, Any]) -> dict[str, Any] | None:

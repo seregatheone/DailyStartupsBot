@@ -1,14 +1,23 @@
+import io
 import unittest
+from contextlib import redirect_stderr
 from typing import Any
 
 from daily_startups_bot.backend import BackendError
 from daily_startups_bot.commands import CommandRouter
 from daily_startups_bot.polling import Poller
+from daily_startups_bot.telegram import TelegramAPIError, TelegramTransportError
 
 
 class FakeTelegram:
-    def __init__(self, updates: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        updates: list[dict[str, Any]],
+        send_errors: dict[int, Exception] | None = None,
+    ) -> None:
         self.updates = updates
+        self.send_errors = send_errors or {}
+        self.send_calls = 0
         self.offsets: list[int | None] = []
         self.sent: list[tuple[int, str]] = []
 
@@ -19,6 +28,10 @@ class FakeTelegram:
     def send_message(
         self, chat_id: int, text: str, parse_mode: str | None = None
     ) -> dict[str, Any]:
+        self.send_calls += 1
+        error = self.send_errors.get(self.send_calls)
+        if error is not None:
+            raise error
         self.sent.append((chat_id, text))
         return {"ok": True}
 
@@ -29,6 +42,18 @@ class FakeRouter:
 
     def handle_update(self, update: dict[str, Any]) -> bool:
         self.handled.append(update["update_id"])
+        return True
+
+
+class LeakyRouter(FakeRouter):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def handle_update(self, update: dict[str, Any]) -> bool:
+        self.handled.append(update["update_id"])
+        if len(self.handled) == 1:
+            raise self.error
         return True
 
 
@@ -78,6 +103,74 @@ class PollingTest(unittest.TestCase):
         self.assertEqual(len(telegram.sent), 2)
         self.assertIn("temporarily unavailable", telegram.sent[0][1])
         self.assertIn("Use /preferences", telegram.sent[1][1])
+
+    def test_transport_send_failure_is_dropped_and_batch_advances(self) -> None:
+        secret = "token=secret-token reply=private-message"
+        telegram = FakeTelegram(
+            [
+                command_update(100, "private-command secret-token"),
+                command_update(101, "/help"),
+            ],
+            send_errors={1: TelegramTransportError(secret)},
+        )
+        router = CommandRouter(backend=FailingBackend(), telegram=telegram)
+        poller = Poller(telegram=telegram, router=router, timeout_seconds=1)
+        logs = io.StringIO()
+
+        with redirect_stderr(logs):
+            handled = poller.run_once()
+
+        self.assertEqual(handled, 2)
+        self.assertEqual(poller.offset, 102)
+        self.assertEqual(len(telegram.sent), 1)
+        self.assertIn("Commands:", telegram.sent[0][1])
+        self.assertIn('"failure_kind": "transport"', logs.getvalue())
+        self.assertIn('"policy": "drop_no_retry"', logs.getvalue())
+        self.assertIn('"command": "unknown"', logs.getvalue())
+        self.assertNotIn("private-command", logs.getvalue())
+        self.assertNotIn("secret-token", logs.getvalue())
+        self.assertNotIn("private-message", logs.getvalue())
+
+    def test_blocked_send_failure_is_dropped_without_raw_description(self) -> None:
+        telegram = FakeTelegram(
+            [command_update(100, "/start"), command_update(101, "/help")],
+            send_errors={
+                1: TelegramAPIError(
+                    403,
+                    "Forbidden: bot was blocked; token=secret-token private-message",
+                )
+            },
+        )
+        router = CommandRouter(backend=FailingBackend(), telegram=telegram)
+        poller = Poller(telegram=telegram, router=router, timeout_seconds=1)
+        logs = io.StringIO()
+
+        with redirect_stderr(logs):
+            handled = poller.run_once()
+
+        self.assertEqual(handled, 2)
+        self.assertEqual(poller.offset, 102)
+        self.assertEqual(len(telegram.sent), 1)
+        self.assertIn('"failure_kind": "api"', logs.getvalue())
+        self.assertIn('"error_code": 403', logs.getvalue())
+        self.assertIn('"blocked": true', logs.getvalue())
+        self.assertNotIn("secret-token", logs.getvalue())
+        self.assertNotIn("private-message", logs.getvalue())
+
+    def test_poller_isolates_normalized_failure_leaked_by_router(self) -> None:
+        telegram = FakeTelegram([{"update_id": 100}, {"update_id": 101}])
+        router = LeakyRouter(TelegramTransportError("must-not-be-logged"))
+        poller = Poller(telegram=telegram, router=router, timeout_seconds=1)
+        logs = io.StringIO()
+
+        with redirect_stderr(logs):
+            handled = poller.run_once()
+
+        self.assertEqual(handled, 1)
+        self.assertEqual(router.handled, [100, 101])
+        self.assertEqual(poller.offset, 102)
+        self.assertIn('"dropped": 1', logs.getvalue())
+        self.assertNotIn("must-not-be-logged", logs.getvalue())
 
 
 if __name__ == "__main__":
