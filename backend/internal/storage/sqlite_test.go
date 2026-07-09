@@ -81,6 +81,88 @@ func TestSQLiteRepositoryPersistsStateAcrossReinitialization(t *testing.T) {
 	assertEqual(t, []DeliveryAttempt{attempt}, gotAttempts)
 }
 
+func TestSaveSubscriptionRollsBackWhenDefaultPreferencesFail(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	must(t, func() error {
+		_, err := repo.db.ExecContext(ctx, `
+CREATE TRIGGER fail_default_preferences
+BEFORE INSERT ON subscriber_preferences
+BEGIN
+	SELECT RAISE(ABORT, 'injected preference failure');
+END
+`)
+		return err
+	}())
+
+	_, err := repo.SaveSubscription(
+		ctx,
+		Subscriber{TelegramID: 42, Username: "sergey", Active: true, CreatedAt: now},
+		Preferences{TelegramID: 42, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 5},
+	)
+	if err == nil {
+		t.Fatal("expected injected preference failure")
+	}
+	_, err = repo.GetSubscriber(ctx, 42)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("partial subscriber survived rollback: %v", err)
+	}
+
+	existing := Subscriber{TelegramID: 43, Username: "existing", Active: false, CreatedAt: now}
+	must(t, repo.SaveSubscriber(ctx, existing))
+	_, err = repo.SaveSubscription(
+		ctx,
+		Subscriber{TelegramID: 43, Username: "updated", Active: true, CreatedAt: now.Add(time.Hour)},
+		Preferences{TelegramID: 43, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 5},
+	)
+	if err == nil {
+		t.Fatal("expected injected preference failure for existing subscriber")
+	}
+	persisted, err := repo.GetSubscriber(ctx, 43)
+	must(t, err)
+	assertEqual(t, existing, persisted)
+}
+
+func TestSaveSubscriptionPreservesExistingPreferencesAndCreationTime(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	createdAt := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
+	original := Subscriber{TelegramID: 42, Username: "sergey", Active: false, CreatedAt: createdAt}
+	custom := Preferences{
+		TelegramID: 42, Regions: []string{"EU"}, Categories: []string{"AI"},
+		DeliveryTime: "10:30", Timezone: "Europe/Moscow", MaxItems: 9,
+	}
+	must(t, repo.SaveSubscriber(ctx, original))
+	must(t, repo.SavePreferences(ctx, custom))
+
+	persisted, err := repo.SaveSubscription(
+		ctx,
+		Subscriber{TelegramID: 42, Active: true, CreatedAt: createdAt.Add(24 * time.Hour)},
+		Preferences{TelegramID: 42, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 5},
+	)
+	must(t, err)
+	if !persisted.Active || persisted.Username != "sergey" || !persisted.CreatedAt.Equal(createdAt) {
+		t.Fatalf("resubscribe changed subscriber identity: %#v", persisted)
+	}
+	preferences, err := repo.GetPreferences(ctx, 42)
+	must(t, err)
+	assertEqual(t, custom, preferences)
+
+	again, err := repo.SaveSubscription(
+		ctx,
+		Subscriber{TelegramID: 42, Username: "new-name", Active: true, CreatedAt: createdAt.Add(48 * time.Hour)},
+		Preferences{TelegramID: 42, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 5},
+	)
+	must(t, err)
+	if again.Username != "new-name" || !again.CreatedAt.Equal(createdAt) {
+		t.Fatalf("idempotent resubscribe failed: %#v", again)
+	}
+	preferences, err = repo.GetPreferences(ctx, 42)
+	must(t, err)
+	assertEqual(t, custom, preferences)
+}
+
 func TestSQLiteRepositoryMigratesOldDeliveryQueueIdempotently(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "old.db")
