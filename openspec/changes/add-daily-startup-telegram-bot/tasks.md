@@ -8,13 +8,13 @@
 
 ## 2. Go Backend API, Configuration, and Persistence
 
-- [ ] 2.1 Implement Go backend configuration loading for database path, timezone, schedules, source definitions, dry-run mode, and internal API settings
-- [ ] 2.2 Implement backend secret redaction for configuration logs and operational errors
-- [ ] 2.3 Define versioned JSON API contracts for subscription, preferences, preview, delivery queue, ingestion trigger, and health
-- [ ] 2.4 Define SQLite schema for subscribers, preferences, source health, normalized signals, digest runs, digest items, delivery queue, delivery attempts, and optional bot update offsets
-- [ ] 2.5 Implement SQLite database initialization and migration handling in Go
-- [ ] 2.6 Implement Go repository interfaces and SQLite-backed repositories
-- [ ] 2.7 Add backend tests proving persisted subscribers, preferences, source items, digests, deliveries, and attempts survive repository reinitialization
+- [x] 2.1 Implement Go backend configuration loading for database path, timezone, schedules, source definitions, dry-run mode, and internal API settings
+- [x] 2.2 Implement backend secret redaction for configuration logs and operational errors
+- [x] 2.3 Define versioned JSON API contracts for subscription, preferences, preview, delivery queue, ingestion trigger, and health
+- [x] 2.4 Define SQLite schema for subscribers, preferences, source health, normalized signals, digest runs, digest items, delivery queue, delivery attempts, and optional bot update offsets
+- [x] 2.5 Implement SQLite database initialization and migration handling in Go
+- [x] 2.6 Implement Go repository interfaces and SQLite-backed repositories
+- [x] 2.7 Add backend tests proving persisted subscribers, preferences, source items, digests, deliveries, and attempts survive repository reinitialization
 
 ## 3. Python Telegram Bot Core
 
