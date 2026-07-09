@@ -17,6 +17,14 @@ class TelegramClient(Protocol):
         ...
 
 
+class TelegramAPIError(RuntimeError):
+    def __init__(self, error_code: int, description: str) -> None:
+        super().__init__(description)
+        self.error_code = error_code
+        self.description = description
+        self.blocked = error_code == 403 and "blocked" in description.lower()
+
+
 @dataclass(frozen=True)
 class TelegramHTTPClient:
     token: str
@@ -47,7 +55,10 @@ class TelegramHTTPClient:
         with urlopen(request, timeout=self.timeout_seconds) as response:
             body = json.loads(response.read().decode("utf-8"))
         if not body.get("ok"):
-            raise RuntimeError(f"Telegram API {method} failed: {body}")
+            raise TelegramAPIError(
+                int(body.get("error_code", 0)),
+                str(body.get("description", f"Telegram API {method} failed")),
+            )
         return body
 
 
