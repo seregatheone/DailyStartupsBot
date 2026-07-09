@@ -28,6 +28,7 @@ const (
 
 type subscriberStore interface {
 	SaveSubscriber(context.Context, storage.Subscriber) error
+	SaveSubscription(context.Context, storage.Subscriber, storage.Preferences) (storage.Subscriber, error)
 	GetSubscriber(context.Context, int64) (storage.Subscriber, error)
 	SavePreferences(context.Context, storage.Preferences) error
 	GetPreferences(context.Context, int64) (storage.Preferences, error)
@@ -125,31 +126,17 @@ func (server *Server) subscribe(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	subscriber, err := server.store.GetSubscriber(request.Context(), body.TelegramID)
-	if errors.Is(err, sql.ErrNoRows) {
-		subscriber = storage.Subscriber{
+	subscriber, err := server.store.SaveSubscription(
+		request.Context(),
+		storage.Subscriber{
 			TelegramID: body.TelegramID,
+			Username:   body.Username,
+			Active:     true,
 			CreatedAt:  server.now(),
-		}
-	} else if err != nil {
-		writeInternalError(writer, err)
-		return
-	}
-	if body.Username != "" || subscriber.Username == "" {
-		subscriber.Username = body.Username
-	}
-	subscriber.Active = true
-	if err := server.store.SaveSubscriber(request.Context(), subscriber); err != nil {
-		writeInternalError(writer, err)
-		return
-	}
-
-	if _, err := server.store.GetPreferences(request.Context(), body.TelegramID); errors.Is(err, sql.ErrNoRows) {
-		if err := server.store.SavePreferences(request.Context(), server.defaultPreferences(body.TelegramID)); err != nil {
-			writeInternalError(writer, err)
-			return
-		}
-	} else if err != nil {
+		},
+		server.defaultPreferences(body.TelegramID),
+	)
+	if err != nil {
 		writeInternalError(writer, err)
 		return
 	}

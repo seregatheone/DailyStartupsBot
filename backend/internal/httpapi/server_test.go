@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -74,6 +75,19 @@ func TestSubscriptionPreferencesAndPreviewWorkflow(t *testing.T) {
 		t.Fatalf("unexpected preferences: %#v", status.Preferences)
 	}
 
+	response = requestJSON(t, http.MethodPost, testServer.URL+"/v1/subscribers/subscribe", map[string]any{
+		"telegram_id": 42,
+	})
+	decodeResponse(t, response, &subscribed)
+	if !subscribed.Subscriber.Active || subscribed.Subscriber.Username != "sergey" {
+		t.Fatalf("resubscribe changed subscriber identity: %#v", subscribed.Subscriber)
+	}
+	response = requestJSON(t, http.MethodGet, testServer.URL+"/v1/subscribers/42/status", nil)
+	decodeResponse(t, response, &status)
+	if status.Preferences.MaxItems != 7 || status.Preferences.DeliveryTime != "09:30" {
+		t.Fatalf("resubscribe reset preferences: %#v", status.Preferences)
+	}
+
 	response = requestJSON(t, http.MethodPost, testServer.URL+"/v1/digests/preview", map[string]any{
 		"telegram_id": 42,
 	})
@@ -89,6 +103,47 @@ func TestSubscriptionPreferencesAndPreviewWorkflow(t *testing.T) {
 	decodeResponse(t, response, &subscribed)
 	if subscribed.Subscriber.Active {
 		t.Fatalf("subscriber should be inactive: %#v", subscribed.Subscriber)
+	}
+}
+
+func TestSubscribeFailureLeavesNoPartialActiveSubscriber(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "backend.db")
+	repository, err := storage.OpenSQLite(context.Background(), databasePath)
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open trigger connection: %v", err)
+	}
+	if _, err := database.Exec(`
+CREATE TRIGGER fail_default_preferences
+BEFORE INSERT ON subscriber_preferences
+BEGIN
+	SELECT RAISE(ABORT, 'injected preference failure');
+END
+`); err != nil {
+		database.Close()
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close trigger connection: %v", err)
+	}
+
+	testServer := httptest.NewServer(NewServer(config.Default(), repository))
+	defer testServer.Close()
+	requestJSONStatus(t, http.MethodPost, testServer.URL+"/v1/subscribers/subscribe", map[string]any{
+		"telegram_id": 77,
+		"username":    "partial",
+	}, http.StatusInternalServerError)
+
+	response := requestJSON(t, http.MethodGet, testServer.URL+"/v1/subscribers/77/status", nil)
+	var status v1.SubscriberStatusResponse
+	decodeResponse(t, response, &status)
+	if status.Subscriber.Active {
+		t.Fatalf("failed subscribe left active subscriber: %#v", status)
 	}
 }
 

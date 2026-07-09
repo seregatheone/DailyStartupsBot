@@ -16,6 +16,7 @@ import (
 
 type Repository interface {
 	SaveSubscriber(context.Context, Subscriber) error
+	SaveSubscription(context.Context, Subscriber, Preferences) (Subscriber, error)
 	GetSubscriber(context.Context, int64) (Subscriber, error)
 	SavePreferences(context.Context, Preferences) error
 	GetPreferences(context.Context, int64) (Preferences, error)
@@ -114,6 +115,70 @@ ON CONFLICT(telegram_id) DO UPDATE SET
 	active = excluded.active
 `, subscriber.TelegramID, subscriber.Username, subscriber.Active, formatTime(subscriber.CreatedAt))
 	return err
+}
+
+func (repo *SQLiteRepository) SaveSubscription(
+	ctx context.Context,
+	subscriber Subscriber,
+	defaults Preferences,
+) (Subscriber, error) {
+	if defaults.TelegramID != subscriber.TelegramID {
+		return Subscriber{}, fmt.Errorf("subscription preferences telegram id mismatch")
+	}
+	regions, err := marshalStrings(defaults.Regions)
+	if err != nil {
+		return Subscriber{}, err
+	}
+	categories, err := marshalStrings(defaults.Categories)
+	if err != nil {
+		return Subscriber{}, err
+	}
+
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Subscriber{}, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO subscribers (telegram_id, username, active, created_at)
+VALUES (?, ?, 1, ?)
+ON CONFLICT(telegram_id) DO UPDATE SET
+	username = CASE
+		WHEN excluded.username != '' OR subscribers.username = '' THEN excluded.username
+		ELSE subscribers.username
+	END,
+	active = 1
+`, subscriber.TelegramID, subscriber.Username, formatTime(subscriber.CreatedAt)); err != nil {
+		return Subscriber{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO subscriber_preferences (telegram_id, regions_json, categories_json, delivery_time, timezone, max_items)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(telegram_id) DO NOTHING
+`, defaults.TelegramID, regions, categories, defaults.DeliveryTime, defaults.Timezone, defaults.MaxItems); err != nil {
+		return Subscriber{}, err
+	}
+
+	var persisted Subscriber
+	var createdAt string
+	if err := tx.QueryRowContext(ctx, `
+SELECT telegram_id, username, active, created_at
+FROM subscribers
+WHERE telegram_id = ?
+`, subscriber.TelegramID).Scan(
+		&persisted.TelegramID,
+		&persisted.Username,
+		&persisted.Active,
+		&createdAt,
+	); err != nil {
+		return Subscriber{}, err
+	}
+	persisted.CreatedAt = parseStoredTime(createdAt)
+	if err := tx.Commit(); err != nil {
+		return Subscriber{}, err
+	}
+	return persisted, nil
 }
 
 func (repo *SQLiteRepository) GetSubscriber(ctx context.Context, telegramID int64) (Subscriber, error) {
