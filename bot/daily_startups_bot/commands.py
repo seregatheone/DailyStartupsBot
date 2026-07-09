@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from daily_startups_bot.backend import BackendError
 from daily_startups_bot.events import log_event
 from daily_startups_bot.preferences import PreferenceParseError, parse_preferences
 from daily_startups_bot.telegram import TelegramClient, extract_message
@@ -42,9 +43,19 @@ class CommandRouter:
         telegram_id = int(user.get("id", chat_id))
         username = str(user.get("username", ""))
 
-        response = self.handle_command(text, telegram_id, username)
+        command = text.split(maxsplit=1)[0]
+        try:
+            response = self.handle_command(text, telegram_id, username)
+        except BackendError as exc:
+            log_event(
+                "telegram_command_failure",
+                command=command,
+                telegram_id=telegram_id,
+                error=str(exc),
+            )
+            response = BACKEND_UNAVAILABLE_TEXT
         self.telegram.send_message(chat_id, response)
-        log_event("telegram_command", command=text.split(maxsplit=1)[0], telegram_id=telegram_id)
+        log_event("telegram_command", command=command, telegram_id=telegram_id)
         return True
 
     def handle_command(self, text: str, telegram_id: int, username: str = "") -> str:
@@ -81,6 +92,10 @@ START_TEXT = (
 HELP_TEXT = (
     "Commands: /start, /help, /subscribe, /unsubscribe, /status, /preview, "
     "/preferences regions=EU categories=AI time=09:00 timezone=Europe/Moscow max=7"
+)
+
+BACKEND_UNAVAILABLE_TEXT = (
+    "The startup service is temporarily unavailable. Please try again in a minute."
 )
 
 

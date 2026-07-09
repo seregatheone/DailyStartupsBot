@@ -13,14 +13,9 @@ DailyStartupsBot is an MVP with two services:
 
 ## Local Configuration
 
-Copy the example files and fill local values:
+The example `.env` files document supported variables. The services read process environment variables and do not load `.env` files automatically; export the required values in your shell or service manager.
 
-```bash
-cp backend/.env.example backend/.env
-cp bot/.env.example bot/.env
-```
-
-Required backend settings:
+Supported backend settings:
 
 - `DAILY_STARTUPS_BACKEND_ENV`
 - `DAILY_STARTUPS_BACKEND_ADDR`
@@ -32,7 +27,7 @@ Required backend settings:
 - `DAILY_STARTUPS_INTERNAL_API_SECRET`
 - `DAILY_STARTUPS_SOURCES_JSON`
 
-Required bot settings:
+Supported bot settings:
 
 - `DAILY_STARTUPS_BOT_ENV`
 - `DAILY_STARTUPS_TELEGRAM_TOKEN`
@@ -46,17 +41,27 @@ Do not commit real tokens, API keys, local databases, or generated runtime state
 
 ```bash
 make run-backend
-make run-bot
+curl --fail http://127.0.0.1:8080/health
 ```
 
-With `DAILY_STARTUPS_DRY_RUN=true`, `make run-backend` runs the sample public source, renders a digest, prints JSON structured logs, and skips Telegram send calls. `make run-bot` starts in dry-run mode without contacting Telegram.
+`make run-backend` starts the local HTTP API. Use `make dry-run-backend` to run the sample public source once, render a digest, print JSON structured logs, and exit without Telegram send calls.
+
+The internal HTTP API is not authenticated yet. Keep `DAILY_STARTUPS_BACKEND_ADDR` bound to loopback (`127.0.0.1`) until authentication is implemented.
 
 For a live Telegram test chat:
 
-1. Create a bot with BotFather and put the real token in `bot/.env` or export `DAILY_STARTUPS_TELEGRAM_TOKEN`.
-2. Set `DAILY_STARTUPS_DRY_RUN=false` for the bot.
-3. Start the backend, then the bot.
-4. In the test chat, verify `/start`, `/help`, `/subscribe`, `/status`, `/preview`, and `/unsubscribe`.
+1. Create a private test bot with BotFather.
+2. Start `make run-backend` in the first terminal and verify `/health`.
+3. Start the bot in the second terminal:
+
+   ```bash
+   DAILY_STARTUPS_TELEGRAM_TOKEN='replace-with-test-token' \
+   DAILY_STARTUPS_BACKEND_BASE_URL='http://127.0.0.1:8080' \
+   DAILY_STARTUPS_DRY_RUN=false \
+   make run-bot
+   ```
+
+4. In the test chat, verify `/start`, `/help`, `/subscribe`, `/status`, `/preferences`, `/preview`, and `/unsubscribe`.
 
 Only run live mode with a private test bot token.
 

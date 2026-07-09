@@ -2,13 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/app"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/config"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/httpapi"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
 
 func main() {
@@ -34,5 +41,52 @@ func main() {
 		for index, message := range result.Messages {
 			logger.Info("dry_run_digest_output", "sequence", index+1, "text", message)
 		}
+		return
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runLiveBackend(ctx, cfg, logger); err != nil {
+		logger.Error("backend_runtime_failure", "error", err.Error())
+		os.Exit(1)
+	}
+}
+
+func runLiveBackend(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+	repository, err := storage.OpenSQLite(ctx, cfg.DatabasePath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer repository.Close()
+
+	listener, err := net.Listen("tcp", cfg.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.ListenAddress, err)
+	}
+	server := &http.Server{
+		Handler:           httpapi.NewServer(cfg, repository),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	serverErrors := make(chan error, 1)
+	logger.Info("backend_listening", "address", listener.Addr().String())
+	go func() {
+		serverErrors <- server.Serve(listener)
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownContext); err != nil {
+			return fmt.Errorf("shutdown backend: %w", err)
+		}
+		if err := <-serverErrors; !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve backend during shutdown: %w", err)
+		}
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve backend: %w", err)
+		}
+	}
+	return nil
 }

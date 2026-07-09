@@ -1,6 +1,7 @@
 import unittest
 from typing import Any
 
+from daily_startups_bot.backend import BackendError
 from daily_startups_bot.commands import CommandRouter
 
 
@@ -50,6 +51,11 @@ class FakeTelegram:
     ) -> dict[str, Any]:
         self.sent.append((chat_id, text))
         return {"ok": True}
+
+
+class FailingBackend(FakeBackend):
+    def subscribe(self, telegram_id: int, username: str = "") -> dict[str, Any]:
+        raise BackendError("backend is unavailable")
 
 
 def update(text: str) -> dict[str, Any]:
@@ -103,6 +109,15 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(telegram_id, 42)
         self.assertEqual(preferences["regions"], ["EU"])
         self.assertEqual(preferences["max_items"], 5)
+
+    def test_backend_failure_replies_without_crashing_command_processing(self) -> None:
+        router = CommandRouter(FailingBackend(), self.telegram)
+
+        self.assertTrue(router.handle_update(update("/subscribe")))
+        self.assertTrue(router.handle_update(update("/preferences")))
+
+        self.assertIn("temporarily unavailable", self.telegram.sent[0][1])
+        self.assertIn("Use /preferences", self.telegram.sent[1][1])
 
 
 if __name__ == "__main__":

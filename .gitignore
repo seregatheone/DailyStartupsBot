@@ -17,6 +17,7 @@ build/
 *.local.db
 *.db
 backend/data/
+logs/
 
 # Node
 node_modules/
@@ -28,3 +29,6 @@ pnpm-debug.log*
 # IDE / local
 .idea/
 .vscode/
+
+# Agent verification artifacts
+swarm-report/
