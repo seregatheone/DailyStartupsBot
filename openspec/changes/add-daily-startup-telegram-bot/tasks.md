@@ -18,13 +18,13 @@
 
 ## 3. Python Telegram Bot Core
 
-- [ ] 3.1 Implement Python configuration loading for Telegram token, backend base URL, polling settings, and dry-run flags
-- [ ] 3.2 Implement Telegram long polling with update offset handling
-- [ ] 3.3 Implement backend API client for subscription, preferences, status, preview, due deliveries, and delivery attempts
-- [ ] 3.4 Implement command routing for `/start`, `/help`, `/subscribe`, `/unsubscribe`, `/status`, `/preview`, and preferences commands
-- [ ] 3.5 Implement subscription lifecycle behavior by delegating state changes to the Go backend
-- [ ] 3.6 Implement subscriber preference parsing and validation before sending updates to the backend
-- [ ] 3.7 Add Python bot tests with fake Telegram updates and fake backend responses
+- [x] 3.1 Implement Python configuration loading for Telegram token, backend base URL, polling settings, and dry-run flags
+- [x] 3.2 Implement Telegram long polling with update offset handling
+- [x] 3.3 Implement backend API client for subscription, preferences, status, preview, due deliveries, and delivery attempts
+- [x] 3.4 Implement command routing for `/start`, `/help`, `/subscribe`, `/unsubscribe`, `/status`, `/preview`, and preferences commands
+- [x] 3.5 Implement subscription lifecycle behavior by delegating state changes to the Go backend
+- [x] 3.6 Implement subscriber preference parsing and validation before sending updates to the backend
+- [x] 3.7 Add Python bot tests with fake Telegram updates and fake backend responses
 
 ## 4. Go Source Ingestion
 
