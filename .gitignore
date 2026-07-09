@@ -6,8 +6,17 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
+dist/
+build/
+*.egg-info/
+
+# Go / local runtime
+*.local.db
+*.db
+backend/data/
 
 # Node
 node_modules/
@@ -19,4 +28,3 @@ pnpm-debug.log*
 # IDE / local
 .idea/
 .vscode/
-

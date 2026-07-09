@@ -1,10 +1,10 @@
 ## 1. Monorepo Scaffold
 
-- [ ] 1.1 Create `backend/` Go module with application entry point and baseline test
-- [ ] 1.2 Create `bot/` Python project with Telegram bot entry point and baseline test
-- [ ] 1.3 Add repo-level scripts or Makefile targets for backend tests, bot tests, full test, and local run
-- [ ] 1.4 Add sample local configuration for both services without secrets
-- [ ] 1.5 Document required environment variables for the Python bot and Go backend
+- [x] 1.1 Create `backend/` Go module with application entry point and baseline test
+- [x] 1.2 Create `bot/` Python project with Telegram bot entry point and baseline test
+- [x] 1.3 Add repo-level scripts or Makefile targets for backend tests, bot tests, full test, and local run
+- [x] 1.4 Add sample local configuration for both services without secrets
+- [x] 1.5 Document required environment variables for the Python bot and Go backend
 
 ## 2. Go Backend API, Configuration, and Persistence
 
@@ -69,4 +69,3 @@
 - [ ] 7.5 Run full backend and bot test suites and fix failures
 - [ ] 7.6 Perform a local dry-run with sample source data and verify rendered digest output
 - [ ] 7.7 Perform an optional Telegram test-chat run with a real bot token and verify subscribe, status, preview, and delivery behavior
-
