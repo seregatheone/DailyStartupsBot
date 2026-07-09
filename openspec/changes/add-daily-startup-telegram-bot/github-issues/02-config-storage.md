@@ -2,20 +2,21 @@ Part of #1
 
 ## Контекст
 
-Боту нужно сохранять подписчиков, preferences, Telegram offsets, source health, normalized startup signals, digest runs и delivery attempts. Без storage нельзя безопасно делать подписки, retry и идемпотентность.
+Go backend владеет состоянием продукта: подписчики, preferences, source health, startup signals, digests, delivery queue и delivery attempts.
 
 **Зависимости:** after #2
 
 ## Задача
 
-Реализовать configuration loading, secret redaction, SQLite schema/migrations и repository layer для durable state.
+Реализовать Go backend API skeleton, configuration loading, secret redaction, SQLite migrations и repository layer.
 
 ## Acceptance criteria
 
-- [ ] Конфигурация читает Telegram token, database path, timezone, schedules, source definitions и dry-run mode.
-- [ ] Отсутствующий Telegram token приводит к понятной configuration error.
-- [ ] Secrets редактируются в logs и errors.
-- [ ] SQLite schema покрывает subscribers, preferences, update offsets, source health, normalized signals, digest runs, digest items и delivery attempts.
-- [ ] Repository tests доказывают, что состояние переживает reinitialization.
-- [ ] `./gradlew test` проходит.
+- [ ] Backend config читает database path, timezone, schedules, source definitions, dry-run mode и internal API settings.
+- [ ] Secrets редактируются в backend logs/errors.
+- [ ] Определены versioned JSON contracts для subscriptions, preferences, preview, delivery queue, ingestion trigger и health.
+- [ ] SQLite schema покрывает subscribers, preferences, source health, normalized signals, digest runs, digest items, delivery queue и delivery attempts.
+- [ ] Go repositories имеют SQLite-backed implementation.
+- [ ] Persistence tests доказывают, что состояние переживает repository/database reinitialization.
+- [ ] `go test ./...` проходит в `backend/`.
 

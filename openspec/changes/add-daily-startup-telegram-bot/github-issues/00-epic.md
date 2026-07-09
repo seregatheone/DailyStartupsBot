@@ -1,46 +1,42 @@
 ## Цель
 
-Собрать MVP Telegram-бота, который каждый день отправляет подписчикам компактный дайджест стартапов: запуски, новости, funding-сигналы, источники и краткое объяснение, почему это важно.
+Реализовать MVP DailyStartupsBot: Python Telegram bot + Go backend, который собирает startup-сигналы, формирует ежедневный digest и доставляет его подписчикам в Telegram.
 
-## Контекст
+## Решение
 
-OpenSpec change: `add-daily-startup-telegram-bot`
-
-План реализации: `openspec/changes/add-daily-startup-telegram-bot/implementation-plan.md`
-
-Текущее состояние:
-
-- В репозитории пока нет application code.
-- OpenSpec артефакты готовы: proposal, design, specs, tasks.
-- MVP выбран как Kotlin/JVM + Gradle, Telegram long polling, SQLite, source adapters, deterministic digest rendering.
-- Платные/restricted источники остаются optional и включаются только при наличии разрешённого access method и credentials.
+- `bot/`: Python Telegram bot, long polling, команды, preview, отправка сообщений.
+- `backend/`: Go service, SQLite, source ingestion, digest pipeline, delivery queue, health.
+- Связь сервисов: versioned internal HTTP API.
+- Источники: только через разрешённые access methods; paid/restricted sources выключены без credentials.
 
 ## Дочерние issues
 
 ### Foundation
 
-- [ ] #2 Scaffold Kotlin/JVM Telegram bot project
-- [ ] #3 Add configuration and SQLite persistence
+- [ ] #2 Завести монорепозиторий: Python bot + Go backend
+- [ ] #3 Реализовать Go backend: API, конфигурация и SQLite
 
-### Bot and Data
+### Product Flow
 
-- [ ] #4 Implement Telegram command and subscription core
-- [ ] #5 Implement startup source ingestion adapters
-- [ ] #6 Implement daily startup digest generation
+- [ ] #4 Реализовать Python Telegram bot: команды и подписки
+- [ ] #5 Реализовать Go ingestion: источники стартапов
+- [ ] #6 Реализовать Go digest pipeline
 
-### Delivery and Operations
+### Delivery and Ops
 
-- [ ] #7 Add scheduled delivery, idempotency, and retries
-- [ ] #8 Add operations, dry-run, docs, and MVP verification
+- [ ] #7 Связать расписание и доставку между Go backend и Python bot
+- [ ] #8 Добавить ops, dry-run, docs и MVP-проверку
 
 ## Acceptance criteria
 
-- [ ] Все OpenSpec requirements покрыты реализацией или явно отложены отдельным follow-up.
-- [ ] `./gradlew test` проходит.
-- [ ] `./gradlew build` проходит.
-- [ ] Dry-run рендерит digest без отправки сообщений в Telegram.
+- [ ] Telegram bot реализован на Python.
+- [ ] Backend реализован на Go.
+- [ ] `make test` проходит.
+- [ ] Backend tests проходят через `go test ./...`.
+- [ ] Bot tests проходят через Python test runner.
+- [ ] Dry-run рендерит digest без отправки в Telegram.
 - [ ] `/start`, `/help`, `/subscribe`, `/unsubscribe`, `/status`, `/preview` работают в test chat.
-- [ ] Ежедневная доставка идемпотентна по subscriber + digest date.
-- [ ] Source failures изолированы и видны в health/logs.
+- [ ] Доставка идемпотентна по subscriber + digest date.
+- [ ] Source failures видны в backend health/logs и не ломают остальные источники.
 - [ ] Secrets не попадают в logs.
 

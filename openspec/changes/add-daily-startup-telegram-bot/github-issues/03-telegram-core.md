@@ -2,21 +2,22 @@ Part of #1
 
 ## Контекст
 
-MVP использует Telegram long polling, чтобы не требовать public webhook endpoint. Команды подписки и preferences являются основным пользовательским интерфейсом.
+Telegram bot должен быть на Python. Он отвечает за Telegram long polling, команды и отправку сообщений, но состояние хранит через Go backend API.
 
 **Зависимости:** after #3
 
 ## Задача
 
-Реализовать Telegram API client, long polling, offset persistence, command routing, subscription lifecycle, status, preview hook и preference parsing.
+Реализовать Python bot core: конфигурация, Telegram polling, backend client, команды подписки/status/preview и parsing preferences.
 
 ## Acceptance criteria
 
-- [ ] Реализованы `getUpdates`/long polling и `sendMessage`.
-- [ ] Telegram update offset сохраняется и не приводит к повторной обработке после restart.
-- [ ] `/start` и `/help` возвращают понятное описание команд.
-- [ ] `/subscribe`, `/unsubscribe`, `/status` управляют subscription state.
-- [ ] Preferences поддерживают regions, categories, delivery time, timezone и max items.
-- [ ] Unit tests используют fake Telegram updates и fake send responses.
-- [ ] `./gradlew test` проходит.
+- [ ] Bot config читает Telegram token, backend base URL, polling settings и dry-run flags.
+- [ ] Реализован Telegram long polling с update offset handling.
+- [ ] Реализован typed backend API client.
+- [ ] `/start` и `/help` отвечают понятным текстом.
+- [ ] `/subscribe`, `/unsubscribe`, `/status` работают через backend API.
+- [ ] `/preview` запрашивает digest preview у backend.
+- [ ] Preferences parser валидирует regions, categories, delivery time, timezone и max items.
+- [ ] Python tests используют fake Telegram updates и fake backend responses.
 
