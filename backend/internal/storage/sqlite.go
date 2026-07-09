@@ -26,6 +26,7 @@ type Repository interface {
 	SaveDigestItem(context.Context, DigestItem) error
 	GetDigestRun(context.Context, string) (DigestRun, []DigestItem, error)
 	SaveDelivery(context.Context, Delivery) error
+	DeliveryExists(context.Context, int64, string) (bool, error)
 	GetDelivery(context.Context, string) (Delivery, error)
 	SaveDeliveryAttempt(context.Context, DeliveryAttempt) error
 	ListDeliveryAttempts(context.Context, string) ([]DeliveryAttempt, error)
@@ -270,6 +271,16 @@ ON CONFLICT(id) DO UPDATE SET
 	attempt = excluded.attempt
 `, delivery.ID, delivery.TelegramID, delivery.DigestID, delivery.DigestDate, delivery.Status, delivery.Attempt, formatTime(delivery.CreatedAt))
 	return err
+}
+
+func (repo *SQLiteRepository) DeliveryExists(ctx context.Context, telegramID int64, digestDate string) (bool, error) {
+	var count int
+	err := repo.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM delivery_queue
+WHERE telegram_id = ? AND digest_date = ?
+`, telegramID, digestDate).Scan(&count)
+	return count > 0, err
 }
 
 func (repo *SQLiteRepository) GetDelivery(ctx context.Context, id string) (Delivery, error) {

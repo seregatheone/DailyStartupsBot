@@ -50,15 +50,15 @@
 
 ## 6. Scheduling and Delivery Bridge
 
-- [ ] 6.1 Implement backend timezone-aware ingestion scheduling from configuration
-- [ ] 6.2 Implement backend timezone-aware delivery queue generation from subscriber preferences and defaults
-- [ ] 6.3 Implement backend delivery idempotency by subscriber and digest date
-- [ ] 6.4 Implement Python delivery worker that fetches due backend deliveries and sends Telegram messages
-- [ ] 6.5 Implement delivery attempt reporting from Python bot to Go backend
-- [ ] 6.6 Implement retry behavior for transient Telegram send failures
-- [ ] 6.7 Implement inactive-subscriber handling when Telegram reports the bot can no longer message a user
-- [ ] 6.8 Implement manual `/preview` flow without mutating scheduled delivery state
-- [ ] 6.9 Add backend and bot tests for due subscribers, inactive subscribers, duplicate prevention, retries, and preview behavior
+- [x] 6.1 Implement backend timezone-aware ingestion scheduling from configuration
+- [x] 6.2 Implement backend timezone-aware delivery queue generation from subscriber preferences and defaults
+- [x] 6.3 Implement backend delivery idempotency by subscriber and digest date
+- [x] 6.4 Implement Python delivery worker that fetches due backend deliveries and sends Telegram messages
+- [x] 6.5 Implement delivery attempt reporting from Python bot to Go backend
+- [x] 6.6 Implement retry behavior for transient Telegram send failures
+- [x] 6.7 Implement inactive-subscriber handling when Telegram reports the bot can no longer message a user
+- [x] 6.8 Implement manual `/preview` flow without mutating scheduled delivery state
+- [x] 6.9 Add backend and bot tests for due subscribers, inactive subscribers, duplicate prevention, retries, and preview behavior
 
 ## 7. Operations and Local Verification
 
