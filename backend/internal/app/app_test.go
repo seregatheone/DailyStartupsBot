@@ -3,10 +3,12 @@ package app
 import (
 	"strings"
 	"testing"
+
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/config"
 )
 
 func TestStartupMessageIncludesServiceName(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := config.Default()
 
 	message := StartupMessage(cfg)
 
