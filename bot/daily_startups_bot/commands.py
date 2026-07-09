@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from daily_startups_bot.events import log_event
 from daily_startups_bot.preferences import PreferenceParseError, parse_preferences
 from daily_startups_bot.telegram import TelegramClient, extract_message
 
@@ -43,6 +44,7 @@ class CommandRouter:
 
         response = self.handle_command(text, telegram_id, username)
         self.telegram.send_message(chat_id, response)
+        log_event("telegram_command", command=text.split(maxsplit=1)[0], telegram_id=telegram_id)
         return True
 
     def handle_command(self, text: str, telegram_id: int, username: str = "") -> str:

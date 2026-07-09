@@ -1,6 +1,7 @@
 from daily_startups_bot.backend import BackendClient
 from daily_startups_bot.commands import CommandRouter
-from daily_startups_bot.config import BotConfig, load_config
+from daily_startups_bot.config import BotConfig, load_config, redacted_config
+from daily_startups_bot.events import log_event
 from daily_startups_bot.polling import Poller
 from daily_startups_bot.telegram import TelegramHTTPClient
 
@@ -23,6 +24,7 @@ def build_poller(config: BotConfig) -> Poller:
 
 def main() -> None:
     config = load_config()
+    log_event("bot_startup", config=redacted_config(config))
     print(startup_message(config))
     if not config.dry_run:
         build_poller(config).run_forever()
