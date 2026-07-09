@@ -1,12 +1,8 @@
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class BotConfig:
-    service_name: str = "daily-startups-bot"
-    environment: str = "local"
-    backend_base_url: str = "http://127.0.0.1:8080"
-    dry_run: bool = True
+from daily_startups_bot.backend import BackendClient
+from daily_startups_bot.commands import CommandRouter
+from daily_startups_bot.config import BotConfig, load_config
+from daily_startups_bot.polling import Poller
+from daily_startups_bot.telegram import TelegramHTTPClient
 
 
 def startup_message(config: BotConfig) -> str:
@@ -14,5 +10,19 @@ def startup_message(config: BotConfig) -> str:
     return f"{config.service_name} starting in {config.environment} against {config.backend_base_url} ({mode})"
 
 
+def build_poller(config: BotConfig) -> Poller:
+    backend = BackendClient(config.backend_base_url)
+    telegram = TelegramHTTPClient(config.telegram_token)
+    router = CommandRouter(backend=backend, telegram=telegram)
+    return Poller(
+        telegram=telegram,
+        router=router,
+        timeout_seconds=config.polling_timeout_seconds,
+    )
+
+
 def main() -> None:
-    print(startup_message(BotConfig()))
+    config = load_config()
+    print(startup_message(config))
+    if not config.dry_run:
+        build_poller(config).run_forever()

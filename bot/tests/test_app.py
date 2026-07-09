@@ -1,6 +1,7 @@
 import unittest
 
-from daily_startups_bot.app import BotConfig, startup_message
+from daily_startups_bot.app import startup_message
+from daily_startups_bot.config import BotConfig
 
 
 class StartupMessageTest(unittest.TestCase):
