@@ -73,6 +73,7 @@ The live backend SHALL run supervised ingestion and delivery planning on timezon
 
 - **WHEN** a normalized signal or source health state cannot be persisted
 - **THEN** delivery publication is skipped for that tick and ingestion is retried before a later snapshot is queued
+
 ### Requirement: Operational logging and health
 
 The system SHALL log structured operational events and expose a human-readable health summary.
@@ -153,3 +154,22 @@ The project SHALL document and expose reproducible commands for validating Russi
 
 - **WHEN** the repository test target executes
 - **THEN** the metadata validation and deterministic localization audit run alongside backend and bot tests
+
+### Requirement: Delivery progress schema migration
+
+The backend SHALL idempotently migrate existing SQLite delivery queues and attempts to durable per-message progress without resetting known queue status or retry state.
+
+#### Scenario: Existing database starts after upgrade
+
+- **WHEN** delivery tables lack progress and sequence columns
+- **THEN** migration adds non-null zero-default columns and preserves existing rows
+
+#### Scenario: Migrated database restarts again
+
+- **WHEN** the same migration runs more than once
+- **THEN** columns are not duplicated and stored cursor/attempt state is unchanged
+
+#### Scenario: Delivery row is saved again
+
+- **WHEN** an existing delivery with confirmed progress is upserted
+- **THEN** generic queue persistence does not rewind the confirmed cursor

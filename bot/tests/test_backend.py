@@ -1,5 +1,6 @@
 from io import BytesIO
 from http.client import RemoteDisconnected
+import json
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
@@ -89,6 +90,38 @@ class BackendClientTest(unittest.TestCase):
             "backend POST /v1/subscribers/subscribe failed with status 500",
         )
         self.assertNotIn("SECRET_BODY", str(raised.exception))
+
+    def test_delivery_attempt_payload_includes_message_sequence(self) -> None:
+        with patch(
+            "daily_startups_bot.backend.urlopen",
+            return_value=FakeResponse(b"{}"),
+        ) as request:
+            self.client.report_delivery_attempt(
+                "delivery-1",
+                {
+                    "attempted_at": "2026-07-10T09:00:00+00:00",
+                    "status": "success",
+                    "sequence": 2,
+                    "telegram_message_id": "101",
+                },
+            )
+
+        sent_request = request.call_args.args[0]
+        self.assertEqual(sent_request.method, "POST")
+        self.assertEqual(
+            sent_request.full_url,
+            "http://127.0.0.1:8080/v1/deliveries/delivery-1/attempts",
+        )
+        self.assertEqual(
+            json.loads(sent_request.data),
+            {
+                "delivery_id": "delivery-1",
+                "attempted_at": "2026-07-10T09:00:00+00:00",
+                "status": "success",
+                "sequence": 2,
+                "telegram_message_id": "101",
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -179,9 +179,9 @@ curl --fail-with-body http://127.0.0.1:8080/v1/deliveries/due
 
 `GET /health` возвращает `status`, `source_health`, optional `last_ingestion_at`, `subscriber_count`, optional `last_delivery_run` и `recent_failures`. List fields возвращаются как пустые arrays, а не `null`.
 
-`GET /v1/deliveries/due` возвращает `{"deliveries":[]}`, если отправлять нечего. Delivery содержит `id`, `telegram_id`, `digest_date`, rendered `messages` и `attempt`. Запись со статусом `retry` появится после `next_attempt_at`; `sent`, `failed` и `blocked` повторно не выдаются.
+`GET /v1/deliveries/due` возвращает `{"deliveries":[]}`, если отправлять нечего. Delivery содержит `id`, `telegram_id`, `digest_date`, `confirmed_through`, только неподтверждённые rendered `messages` с исходными `sequence` и retry `attempt`. Запись со статусом `retry` появится после `next_attempt_at`; `sent`, `failed` и `blocked` повторно не выдаются.
 
-После Telegram send attempt передайте `success`, `failed` или `blocked`:
+После каждой Telegram message сразу передайте её `sequence` и результат `success`, `failed` или `blocked`:
 
 ```bash
 curl --fail-with-body \
@@ -191,12 +191,15 @@ curl --fail-with-body \
     "delivery_id": "example-delivery-001",
     "attempted_at": "2026-07-10T12:00:00Z",
     "status": "success",
+    "sequence": 1,
     "telegram_message_id": "example-message-001"
   }' \
   http://127.0.0.1:8080/v1/deliveries/example-delivery-001/attempts
 ```
 
-Response возвращает итоговый queue `status` (`sent`, `retry`, `failed` или `blocked`) и attempt count; для точного повтора устанавливается `duplicate: true`. При потерянном HTTP response повторяйте исходный payload целиком, включая `attempted_at` и optional error fields.
+Intermediate success двигает `confirmed_through`, но не увеличивает retry count и не помечает delivery как `sent`; final success делает terminal transition. Failure/blocked сохраняют cursor, поэтому следующий due response не содержит уже подтверждённые части. Response возвращает `confirmed_through`, queue `status` (`due`, `sent`, `retry`, `failed` или `blocked`) и attempt count; для точного повтора устанавливается `duplicate: true`. При потерянном HTTP response повторяйте исходный payload целиком, включая `sequence`, `attempted_at` и optional error fields.
+
+Legacy client может не передавать `sequence`: aggregate success подтвердит все оставшиеся messages, а failed/blocked сохранит cursor. Это совместимость для поэтапного deploy; новый worker всегда использует per-message sequence.
 
 ## Тесты
 

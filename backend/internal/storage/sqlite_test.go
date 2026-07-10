@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -347,38 +348,48 @@ CREATE TABLE delivery_queue (
 	status TEXT NOT NULL,
 	attempt INTEGER NOT NULL,
 	created_at TEXT NOT NULL,
-	UNIQUE (telegram_id, digest_date)
-)
-`)
+		UNIQUE (telegram_id, digest_date)
+	)
+	;
+	CREATE TABLE delivery_attempts (
+		id TEXT PRIMARY KEY,
+		delivery_id TEXT NOT NULL,
+		attempted_at TEXT NOT NULL,
+		status TEXT NOT NULL,
+		telegram_message_id TEXT NOT NULL DEFAULT '',
+		error_code TEXT NOT NULL DEFAULT '',
+		error_message TEXT NOT NULL DEFAULT ''
+	);
+	INSERT INTO delivery_queue (id, telegram_id, digest_id, digest_date, status, attempt, created_at)
+	VALUES ('legacy', 42, 'digest', '2026-07-10', 'retry', 2, '2026-07-10T08:00:00Z');
+	INSERT INTO delivery_attempts (id, delivery_id, attempted_at, status)
+	VALUES ('legacy-attempt', 'legacy', '2026-07-10T08:00:00Z', 'failed')
+	`)
 	must(t, err)
 	must(t, db.Close())
 
-	for range 2 {
-		repo, err := OpenSQLite(ctx, dbPath)
-		must(t, err)
-		must(t, repo.Close())
-	}
+	repo, err := OpenSQLite(ctx, dbPath)
+	must(t, err)
+	_, err = repo.db.ExecContext(ctx, `UPDATE delivery_queue SET confirmed_through = 1 WHERE id = 'legacy'`)
+	must(t, err)
+	must(t, repo.Close())
+	repo, err = OpenSQLite(ctx, dbPath)
+	must(t, err)
+	must(t, repo.Close())
 
 	db, err = sql.Open("sqlite", dbPath)
 	must(t, err)
 	defer db.Close()
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(delivery_queue)`)
-	must(t, err)
-	defer rows.Close()
-	count := 0
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, primaryKey int
-		var defaultValue sql.NullString
-		must(t, rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey))
-		if name == "next_attempt_at" {
-			count++
-		}
-	}
-	must(t, rows.Err())
-	if count != 1 {
-		t.Fatalf("expected one next_attempt_at column, got %d", count)
+	assertSQLiteColumnCount(t, db, "delivery_queue", "next_attempt_at", 1)
+	assertSQLiteColumnCount(t, db, "delivery_queue", "confirmed_through", 1)
+	assertSQLiteColumnCount(t, db, "delivery_attempts", "sequence", 1)
+
+	var status string
+	var attempt, confirmedThrough, sequence int
+	must(t, db.QueryRowContext(ctx, `SELECT status, attempt, confirmed_through FROM delivery_queue WHERE id = 'legacy'`).Scan(&status, &attempt, &confirmedThrough))
+	must(t, db.QueryRowContext(ctx, `SELECT sequence FROM delivery_attempts WHERE id = 'legacy-attempt'`).Scan(&sequence))
+	if status != "retry" || attempt != 2 || confirmedThrough != 1 || sequence != 0 {
+		t.Fatalf("migration changed legacy state: status=%s attempt=%d cursor=%d sequence=%d", status, attempt, confirmedThrough, sequence)
 	}
 }
 
@@ -458,7 +469,10 @@ func TestRecordDeliveryAttemptIsIdempotentBeforeTerminalCheck(t *testing.T) {
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	delivery := seedDelivery(t, repo, 1, "delivery", "due", now)
 	attempt := DeliveryAttempt{ID: "attempt-success", DeliveryID: delivery.ID, AttemptedAt: now, Status: "success", TelegramMessageID: "100"}
-	transition := DeliveryTransition{ExpectedAttempt: 0, Status: "sent", Attempt: 1}
+	transition := DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 0, TotalMessages: 1,
+		Status: "sent", Attempt: 1, ConfirmedThrough: 1,
+	}
 
 	updated, duplicate, err := repo.RecordDeliveryAttempt(ctx, attempt, transition)
 	must(t, err)
@@ -479,7 +493,10 @@ func TestRecordDeliveryAttemptIsIdempotentBeforeTerminalCheck(t *testing.T) {
 
 	_, _, err = repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
 		ID: "different-attempt", DeliveryID: delivery.ID, AttemptedAt: now.Add(time.Second), Status: "failed",
-	}, DeliveryTransition{ExpectedAttempt: 1, Status: "failed", Attempt: 2})
+	}, DeliveryTransition{
+		ExpectedAttempt: 1, ExpectedConfirmedThrough: 1, TotalMessages: 1,
+		Status: "failed", Attempt: 2, ConfirmedThrough: 1,
+	})
 	if !errors.Is(err, ErrDeliveryTerminal) {
 		t.Fatalf("expected terminal error, got %v", err)
 	}
@@ -493,10 +510,8 @@ func TestRecordDeliveryAttemptRejectsConflictWithoutPartialWrite(t *testing.T) {
 	attempt := DeliveryAttempt{ID: "conflict", DeliveryID: delivery.ID, AttemptedAt: now, Status: "failed", ErrorMessage: "private body"}
 
 	_, _, err := repo.RecordDeliveryAttempt(ctx, attempt, DeliveryTransition{
-		ExpectedAttempt: 1,
-		Status:          "retry",
-		Attempt:         2,
-		NextAttemptAt:   now.Add(time.Minute),
+		ExpectedAttempt: 1, ExpectedConfirmedThrough: 0, TotalMessages: 1,
+		Status: "retry", Attempt: 2, ConfirmedThrough: 0, NextAttemptAt: now.Add(time.Minute),
 	})
 	if !errors.Is(err, ErrDeliveryConflict) {
 		t.Fatalf("expected conflict, got %v", err)
@@ -519,7 +534,10 @@ func TestRecordDeliveryAttemptSchedulesRetryAndBlocksUntilDue(t *testing.T) {
 	nextAttemptAt := now.Add(15 * time.Minute)
 	updated, duplicate, err := repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
 		ID: "retry", DeliveryID: delivery.ID, AttemptedAt: now, Status: "failed",
-	}, DeliveryTransition{ExpectedAttempt: 0, Status: "retry", Attempt: 1, NextAttemptAt: nextAttemptAt})
+	}, DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 0, TotalMessages: 1,
+		Status: "retry", Attempt: 1, ConfirmedThrough: 0, NextAttemptAt: nextAttemptAt,
+	})
 	must(t, err)
 	if duplicate {
 		t.Fatal("first retry attempt unexpectedly marked duplicate")
@@ -537,17 +555,247 @@ func TestRecordDeliveryAttemptSchedulesRetryAndBlocksUntilDue(t *testing.T) {
 	assertEqual(t, []Delivery{updated}, atDue)
 }
 
+func TestRecordDeliveryMessageProgressRetriesAndCompletesWithoutRewind(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	delivery := seedDelivery(t, repo, 1, "message-progress", "due", now)
+
+	first := DeliveryAttempt{
+		ID: "message-1", DeliveryID: delivery.ID, AttemptedAt: now,
+		Status: "success", Sequence: 1, TelegramMessageID: "101",
+	}
+	firstTransition := DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 0, TotalMessages: 3,
+		Status: "due", Attempt: 0, ConfirmedThrough: 1,
+	}
+	updated, duplicate, err := repo.RecordDeliveryAttempt(ctx, first, firstTransition)
+	must(t, err)
+	if duplicate || updated.Status != "due" || updated.Attempt != 0 || updated.ConfirmedThrough != 1 {
+		t.Fatalf("unexpected intermediate progress: delivery=%#v duplicate=%v", updated, duplicate)
+	}
+
+	replayed, duplicate, err := repo.RecordDeliveryAttempt(ctx, first, firstTransition)
+	must(t, err)
+	if !duplicate || replayed.ConfirmedThrough != 1 || replayed.Attempt != 0 {
+		t.Fatalf("exact message replay changed progress: delivery=%#v duplicate=%v", replayed, duplicate)
+	}
+
+	nextAttemptAt := now.Add(15 * time.Minute)
+	failed := DeliveryAttempt{
+		ID: "message-2-failed", DeliveryID: delivery.ID, AttemptedAt: now.Add(time.Second),
+		Status: "failed", Sequence: 2, ErrorCode: "timeout",
+	}
+	updated, duplicate, err = repo.RecordDeliveryAttempt(ctx, failed, DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 1, TotalMessages: 3,
+		Status: "retry", Attempt: 1, ConfirmedThrough: 1, NextAttemptAt: nextAttemptAt,
+	})
+	must(t, err)
+	if duplicate || updated.Status != "retry" || updated.Attempt != 1 || updated.ConfirmedThrough != 1 {
+		t.Fatalf("failure did not preserve progress: delivery=%#v duplicate=%v", updated, duplicate)
+	}
+
+	second := DeliveryAttempt{
+		ID: "message-2-success", DeliveryID: delivery.ID, AttemptedAt: nextAttemptAt,
+		Status: "success", Sequence: 2, TelegramMessageID: "102",
+	}
+	updated, duplicate, err = repo.RecordDeliveryAttempt(ctx, second, DeliveryTransition{
+		ExpectedAttempt: 1, ExpectedConfirmedThrough: 1, TotalMessages: 3,
+		Status: "due", Attempt: 1, ConfirmedThrough: 2,
+	})
+	must(t, err)
+	if duplicate || updated.Status != "due" || updated.Attempt != 1 || updated.ConfirmedThrough != 2 || !updated.NextAttemptAt.IsZero() {
+		t.Fatalf("retry success did not clear delay and advance once: delivery=%#v duplicate=%v", updated, duplicate)
+	}
+
+	final := DeliveryAttempt{
+		ID: "message-3-success", DeliveryID: delivery.ID, AttemptedAt: nextAttemptAt.Add(time.Second),
+		Status: "success", Sequence: 3, TelegramMessageID: "103",
+	}
+	finalTransition := DeliveryTransition{
+		ExpectedAttempt: 1, ExpectedConfirmedThrough: 2, TotalMessages: 3,
+		Status: "sent", Attempt: 2, ConfirmedThrough: 3,
+	}
+	updated, duplicate, err = repo.RecordDeliveryAttempt(ctx, final, finalTransition)
+	must(t, err)
+	if duplicate || updated.Status != "sent" || updated.Attempt != 2 || updated.ConfirmedThrough != 3 {
+		t.Fatalf("final success was not atomic: delivery=%#v duplicate=%v", updated, duplicate)
+	}
+	replayed, duplicate, err = repo.RecordDeliveryAttempt(ctx, final, finalTransition)
+	must(t, err)
+	if !duplicate || replayed != updated {
+		t.Fatalf("terminal replay was not idempotent: delivery=%#v duplicate=%v", replayed, duplicate)
+	}
+
+	attempts, err := repo.ListDeliveryAttempts(ctx, delivery.ID)
+	must(t, err)
+	if len(attempts) != 4 || attempts[0].Sequence != 1 || attempts[1].Sequence != 2 ||
+		attempts[2].Sequence != 2 || attempts[3].Sequence != 3 {
+		t.Fatalf("unexpected persisted message attempts: %#v", attempts)
+	}
+}
+
+func TestRecordDeliveryMessageProgressRejectsGapAndStaleAttemptWithoutPartialWrite(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	delivery := seedDelivery(t, repo, 1, "message-conflict", "due", now)
+
+	_, _, err := repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+		ID: "gap", DeliveryID: delivery.ID, AttemptedAt: now, Status: "success", Sequence: 2,
+	}, DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 0, TotalMessages: 2,
+		Status: "sent", Attempt: 1, ConfirmedThrough: 2,
+	})
+	if !errors.Is(err, ErrDeliveryConflict) {
+		t.Fatalf("expected sequence gap conflict, got %v", err)
+	}
+
+	first := DeliveryAttempt{ID: "first", DeliveryID: delivery.ID, AttemptedAt: now, Status: "success", Sequence: 1}
+	_, _, err = repo.RecordDeliveryAttempt(ctx, first, DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 0, TotalMessages: 2,
+		Status: "due", Attempt: 0, ConfirmedThrough: 1,
+	})
+	must(t, err)
+	_, _, err = repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+		ID: "stale", DeliveryID: delivery.ID, AttemptedAt: now.Add(time.Second), Status: "success", Sequence: 1,
+	}, DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 1, TotalMessages: 2,
+		Status: "due", Attempt: 0, ConfirmedThrough: 1,
+	})
+	if !errors.Is(err, ErrDeliveryConflict) {
+		t.Fatalf("expected stale sequence conflict, got %v", err)
+	}
+
+	got, err := repo.GetDelivery(ctx, delivery.ID)
+	must(t, err)
+	if got.ConfirmedThrough != 1 || got.Attempt != 0 || got.Status != "due" {
+		t.Fatalf("conflict changed delivery: %#v", got)
+	}
+	attempts, err := repo.ListDeliveryAttempts(ctx, delivery.ID)
+	must(t, err)
+	if len(attempts) != 1 || attempts[0].ID != first.ID {
+		t.Fatalf("conflict persisted partial attempts: %#v", attempts)
+	}
+}
+
+func TestConcurrentMessageProgressUsesAttemptAndCursorCAS(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	delivery := seedDelivery(t, repo, 1, "message-race", "due", now)
+	transition := DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 0, TotalMessages: 2,
+		Status: "due", Attempt: 0, ConfirmedThrough: 1,
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wait sync.WaitGroup
+	for index := range 2 {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			_, _, err := repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+				ID: fmt.Sprintf("racing-%d", index), DeliveryID: delivery.ID,
+				AttemptedAt: now, Status: "success", Sequence: 1,
+			}, transition)
+			results <- err
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+
+	succeeded, conflicted := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrDeliveryConflict):
+			conflicted++
+		default:
+			t.Fatalf("unexpected race result: %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("unexpected CAS results: success=%d conflict=%d", succeeded, conflicted)
+	}
+	got, err := repo.GetDelivery(ctx, delivery.ID)
+	must(t, err)
+	attempts, err := repo.ListDeliveryAttempts(ctx, delivery.ID)
+	must(t, err)
+	if got.ConfirmedThrough != 1 || got.Attempt != 0 || len(attempts) != 1 {
+		t.Fatalf("race advanced progress twice: delivery=%#v attempts=%#v", got, attempts)
+	}
+}
+
+func TestSaveDeliveryDoesNotRewindConfirmedProgress(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	seedSubscriberAndDigest(t, repo, 1, true, "digest-save-progress", now)
+	delivery := Delivery{
+		ID: "save-progress", TelegramID: 1, DigestID: "digest-save-progress",
+		DigestDate: "2026-07-10", Status: "retry", Attempt: 1, ConfirmedThrough: 2, CreatedAt: now,
+	}
+	must(t, repo.SaveDelivery(ctx, delivery))
+	delivery.ConfirmedThrough = 0
+	must(t, repo.SaveDelivery(ctx, delivery))
+	got, err := repo.GetDelivery(ctx, delivery.ID)
+	must(t, err)
+	if got.ConfirmedThrough != 2 {
+		t.Fatalf("generic delivery save rewound cursor: %#v", got)
+	}
+}
+
+func TestPermanentFailurePreservesConfirmedMessageProgress(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	seedSubscriberAndDigest(t, repo, 1, true, "digest-terminal-progress", now)
+	delivery := Delivery{
+		ID: "terminal-progress", TelegramID: 1, DigestID: "digest-terminal-progress",
+		DigestDate: "2026-07-10", Status: "retry", Attempt: 2, ConfirmedThrough: 1, CreatedAt: now,
+	}
+	must(t, repo.SaveDelivery(ctx, delivery))
+
+	updated, duplicate, err := repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+		ID: "terminal-failure", DeliveryID: delivery.ID, AttemptedAt: now,
+		Status: "failed", Sequence: 2, ErrorCode: "timeout",
+	}, DeliveryTransition{
+		ExpectedAttempt: 2, ExpectedConfirmedThrough: 1, TotalMessages: 2,
+		Status: "failed", Attempt: 3, ConfirmedThrough: 1,
+	})
+	must(t, err)
+	if duplicate || updated.Status != "failed" || updated.Attempt != 3 || updated.ConfirmedThrough != 1 {
+		t.Fatalf("terminal failure changed progress: delivery=%#v duplicate=%v", updated, duplicate)
+	}
+}
+
 func TestRecordDeliveryAttemptDeactivatesBlockedSubscriberAtomically(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
 	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
 	delivery := seedDelivery(t, repo, 1, "delivery", "due", now)
+	_, _, err := repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+		ID: "confirmed-first", DeliveryID: delivery.ID, AttemptedAt: now,
+		Status: "success", Sequence: 1,
+	}, DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 0, TotalMessages: 2,
+		Status: "due", Attempt: 0, ConfirmedThrough: 1,
+	})
+	must(t, err)
 
 	updated, _, err := repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
-		ID: "blocked", DeliveryID: delivery.ID, AttemptedAt: now, Status: "blocked",
-	}, DeliveryTransition{ExpectedAttempt: 0, Status: "blocked", Attempt: 1, DeactivateSubscriber: true})
+		ID: "blocked", DeliveryID: delivery.ID, AttemptedAt: now, Status: "blocked", Sequence: 2,
+	}, DeliveryTransition{
+		ExpectedAttempt: 0, ExpectedConfirmedThrough: 1, TotalMessages: 2,
+		Status: "blocked", Attempt: 1, ConfirmedThrough: 1, DeactivateSubscriber: true,
+	})
 	must(t, err)
-	if updated.Status != "blocked" {
+	if updated.Status != "blocked" || updated.ConfirmedThrough != 1 {
 		t.Fatalf("expected blocked state, got %#v", updated)
 	}
 	subscriber, err := repo.GetSubscriber(ctx, delivery.TelegramID)
@@ -639,6 +887,28 @@ func openTestRepository(t *testing.T) *SQLiteRepository {
 	must(t, err)
 	t.Cleanup(func() { must(t, repo.Close()) })
 	return repo
+}
+
+func assertSQLiteColumnCount(t *testing.T, db *sql.DB, table, column string, expected int) {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	must(t, err)
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		must(t, rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey))
+		if name == column {
+			count++
+		}
+	}
+	must(t, rows.Err())
+	if count != expected {
+		t.Fatalf("expected %d %s.%s columns, got %d", expected, table, column, count)
+	}
 }
 
 func seedSubscriberAndDigest(t *testing.T, repo *SQLiteRepository, telegramID int64, active bool, digestID string, now time.Time) {

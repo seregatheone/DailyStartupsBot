@@ -72,14 +72,15 @@ type DigestItem struct {
 }
 
 type Delivery struct {
-	ID            string
-	TelegramID    int64
-	DigestID      string
-	DigestDate    string
-	Status        string
-	Attempt       int
-	NextAttemptAt time.Time
-	CreatedAt     time.Time
+	ID               string
+	TelegramID       int64
+	DigestID         string
+	DigestDate       string
+	Status           string
+	Attempt          int
+	ConfirmedThrough int
+	NextAttemptAt    time.Time
+	CreatedAt        time.Time
 }
 
 type DeliveryAttempt struct {
@@ -87,17 +88,21 @@ type DeliveryAttempt struct {
 	DeliveryID        string
 	AttemptedAt       time.Time
 	Status            string
+	Sequence          int
 	TelegramMessageID string
 	ErrorCode         string
 	ErrorMessage      string
 }
 
 type DeliveryTransition struct {
-	ExpectedAttempt      int
-	Status               string
-	Attempt              int
-	NextAttemptAt        time.Time
-	DeactivateSubscriber bool
+	ExpectedAttempt          int
+	ExpectedConfirmedThrough int
+	TotalMessages            int
+	Status                   string
+	Attempt                  int
+	ConfirmedThrough         int
+	NextAttemptAt            time.Time
+	DeactivateSubscriber     bool
 }
 
 type HealthSnapshot struct {
