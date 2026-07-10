@@ -17,10 +17,8 @@ from unittest.mock import patch
 from scripts.telegram_e2e import (
     E2EError,
     E2EBackendClient,
-    INVALID_PREFERENCES_COMMAND,
     ManualTelegramWebDriver,
     TelegramE2ERunner,
-    VALID_PREFERENCES_COMMAND,
     _positive_float,
     _validate_backend_url,
     main,
@@ -74,10 +72,6 @@ class ScriptedDriver:
             ),
             "/subscribe": "Подписка оформлена. Вы будете получать ежедневный дайджест стартапов.",
             "/status": "",
-            VALID_PREFERENCES_COMMAND: "Настройки обновлены.",
-            INVALID_PREFERENCES_COMMAND: (
-                "Не удалось обновить настройки: Количество элементов должно быть от 1 до 10."
-            ),
             "/preview": "🚀 Стартапы дня\n10 июля 2026 · Europe/Moscow",
             "/unsubscribe": "Подписка отключена. Ежедневная доставка остановлена.",
         }
@@ -85,16 +79,6 @@ class ScriptedDriver:
     def exchange(self, command: str, timeout_seconds: float) -> str:
         if command == "/subscribe":
             self.backend.state["active"] = True
-        elif command == VALID_PREFERENCES_COMMAND:
-            self.backend.state.update(
-                {
-                    "regions": ["EU"],
-                    "categories": ["AI"],
-                    "delivery_time": "09:17",
-                    "timezone": "Europe/Moscow",
-                    "max_items": 7,
-                }
-            )
         elif command == "/unsubscribe":
             self.backend.state["active"] = False
         if command == "/status":
@@ -131,9 +115,6 @@ class TelegramE2ERunnerTests(unittest.TestCase):
                 "help",
                 "subscribe",
                 "status",
-                "preferences_valid",
-                "preferences_invalid",
-                "status_updated",
                 "preview",
                 "unsubscribe",
             ],
@@ -141,7 +122,7 @@ class TelegramE2ERunnerTests(unittest.TestCase):
         serialized = json.dumps(receipt.as_dict()) + output.getvalue()
         self.assertNotIn("987654321", serialized)
         self.assertNotIn("/preferences", serialized)
-        self.assertFalse(backend.state["active"])
+        self.assertEqual(backend.state, DEFAULT_STATE)
 
     def test_unexpected_response_fails_without_recording_response(self) -> None:
         backend = FakeBackend()
@@ -181,31 +162,6 @@ class TelegramE2ERunnerTests(unittest.TestCase):
         self.assertEqual(
             receipt.failure,
             {"step": "preview", "kind": "unexpected_telegram_response"},
-        )
-
-    def test_invalid_preferences_must_not_change_backend_state(self) -> None:
-        backend = FakeBackend()
-        driver = ScriptedDriver(backend)
-        original_exchange = driver.exchange
-
-        def mutating_exchange(command: str, timeout_seconds: float) -> str:
-            response = original_exchange(command, timeout_seconds)
-            if command == INVALID_PREFERENCES_COMMAND:
-                backend.state["max_items"] = 10
-            return response
-
-        driver.exchange = mutating_exchange  # type: ignore[method-assign]
-        receipt = TelegramE2ERunner(
-            telegram_id=42,
-            backend=backend,
-            driver=driver,
-            output_stream=io.StringIO(),
-        ).run()
-
-        self.assertEqual(receipt.status, "fail")
-        self.assertEqual(
-            receipt.failure,
-            {"step": "preferences_invalid", "kind": "backend_state_mismatch"},
         )
 
     def test_driver_timeout_is_reported_with_current_step(self) -> None:
