@@ -2,7 +2,6 @@ package digest
 
 import (
 	"encoding/json"
-	"net/url"
 	"strings"
 
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
@@ -24,25 +23,15 @@ func (generator Generator) score(item Item, preferences storage.Preferences) int
 	return score
 }
 
-func canonicalURL(raw string) string {
-	raw = strings.TrimSpace(raw)
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return strings.TrimRight(raw, "/")
-	}
-	parsed.Fragment = ""
-	parsed.RawQuery = ""
-	parsed.Host = strings.ToLower(parsed.Host)
-	return strings.TrimRight(parsed.String(), "/")
-}
-
 func signalWeight(signalType string) int {
 	switch strings.ToLower(signalType) {
 	case "funding":
 		return 40
 	case "launch":
 		return 30
-	case "ranking":
+	case "award":
+		return 25
+	case "acquisition", "ranking":
 		return 20
 	case "news":
 		return 10

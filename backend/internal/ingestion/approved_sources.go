@@ -53,14 +53,15 @@ type runtimeSourceCatalog struct {
 }
 
 type runtimeCatalogSource struct {
-	ID             string   `json:"id"`
-	DisplayName    string   `json:"display_name"`
-	Status         string   `json:"status"`
-	FeedURL        string   `json:"feed_url"`
-	TermsURL       string   `json:"terms_url"`
-	AccessMethod   string   `json:"access_method"`
-	Credentials    []string `json:"credentials"`
-	AccessEvidence struct {
+	ID                     string   `json:"id"`
+	DisplayName            string   `json:"display_name"`
+	Status                 string   `json:"status"`
+	FeedURL                string   `json:"feed_url"`
+	TermsURL               string   `json:"terms_url"`
+	AccessMethod           string   `json:"access_method"`
+	Credentials            []string `json:"credentials"`
+	ExpectedFreshnessHours int      `json:"expected_freshness_hours"`
+	AccessEvidence         struct {
 		ContentType string `json:"content_type"`
 	} `json:"access_evidence"`
 	RequestPolicy struct {
@@ -72,6 +73,9 @@ type runtimeCatalogSource struct {
 		RateLimit         string `json:"rate_limit"`
 		UserAgentRequired bool   `json:"user_agent_required"`
 	} `json:"request_policy"`
+	FallbackPolicy struct {
+		ServeStaleAsNew bool `json:"serve_stale_as_new"`
+	} `json:"fallback_policy"`
 }
 
 func RegistryForMode(dryRun bool) (Registry, error) {
@@ -169,6 +173,7 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 		}
 		seenFeeds[source.FeedURL] = true
 		if source.DisplayName == "" || source.AccessEvidence.ContentType == "" ||
+			source.ExpectedFreshnessHours < 1 || source.FallbackPolicy.ServeStaleAsNew ||
 			source.RequestPolicy.CadenceMinutes < 1 || source.RequestPolicy.TimeoutSeconds < 1 ||
 			source.RequestPolicy.MaxRedirects < 0 || source.RequestPolicy.MaxResponseBytes < 1 ||
 			source.RequestPolicy.MaxItems < 1 || source.RequestPolicy.RateLimit == "" ||
@@ -192,6 +197,10 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 			MaxItems:            source.RequestPolicy.MaxItems,
 			UserAgent:           DefaultFeedUserAgent,
 			Mapper:              approvedSourceMapper(policy),
+			QualityPolicy: QualityPolicy{
+				MaxAge:        time.Duration(source.ExpectedFreshnessHours) * time.Hour,
+				MaxFutureSkew: 15 * time.Minute,
+			},
 		})
 		if err != nil {
 			return Registry{}, nil, fmt.Errorf("approved source adapter %s is invalid: %w", source.ID, err)

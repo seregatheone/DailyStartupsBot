@@ -105,13 +105,17 @@ type IngestionRunResponse struct {
 }
 
 type SourceResult struct {
-	SourceID    string `json:"source_id"`
-	Status      string `json:"status"`
-	Fetched     int    `json:"fetched"`
-	Normalized  int    `json:"normalized"`
-	Stored      int    `json:"stored"`
-	Skipped     int    `json:"skipped"`
-	ErrorReason string `json:"error_reason,omitempty"`
+	SourceID         string         `json:"source_id"`
+	Status           string         `json:"status"`
+	Fetched          int            `json:"fetched"`
+	Normalized       int            `json:"normalized"`
+	Stored           int            `json:"stored"`
+	Skipped          int            `json:"skipped"`
+	AdapterSkipped   int            `json:"adapter_skipped"`
+	QualityRejected  int            `json:"quality_rejected"`
+	StoreFailed      int            `json:"store_failed"`
+	RejectionReasons map[string]int `json:"rejection_reasons,omitempty"`
+	ErrorReason      string         `json:"error_reason,omitempty"`
 }
 
 type HealthResponse struct {

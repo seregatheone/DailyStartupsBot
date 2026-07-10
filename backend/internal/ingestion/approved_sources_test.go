@@ -43,6 +43,13 @@ func TestAssembleRuntimeUsesCatalogAsSingleLiveSourceOwner(t *testing.T) {
 	if len(registered) != 3 || len(skipped) != 0 {
 		t.Fatalf("approved adapters were not registered: registered=%#v skipped=%#v", registered, skipped)
 	}
+	for _, registeredSource := range registered {
+		approved := wantByID[registeredSource.Config.ID]
+		if registeredSource.Metadata.QualityPolicy.MaxAge != time.Duration(approved.ExpectedFreshnessHours)*time.Hour ||
+			registeredSource.Metadata.QualityPolicy.MaxFutureSkew != 15*time.Minute {
+			t.Fatalf("catalog freshness was not applied: %#v", registeredSource.Metadata.QualityPolicy)
+		}
+	}
 }
 
 func TestAssembleRuntimeTreatsConfigurationAsStrictActivationOverlay(t *testing.T) {
@@ -147,7 +154,9 @@ func TestApprovedSourceServiceIsolatesOneFeedFailure(t *testing.T) {
 	}
 
 	store := &memoryStore{}
-	result, err := NewService(NewRegistry(adapters...), store).Run(context.Background(), configs)
+	service := NewService(NewRegistry(adapters...), store)
+	service.now = func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) }
+	result, err := service.Run(context.Background(), configs)
 	if err != nil {
 		t.Fatalf("isolated source failure returned cycle error: %v", err)
 	}
@@ -293,6 +302,10 @@ func approvedFixtureAdapter(
 		UserAgent:           DefaultFeedUserAgent,
 		Transport:           server.Client().Transport,
 		Mapper:              approvedSourceMapper(approvedSourcePolicies[source.ID]),
+		QualityPolicy: QualityPolicy{
+			MaxAge:        time.Duration(source.ExpectedFreshnessHours) * time.Hour,
+			MaxFutureSkew: 15 * time.Minute,
+		},
 	})
 	if err != nil {
 		t.Fatalf("new approved fixture adapter: %v", err)

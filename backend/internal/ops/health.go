@@ -16,12 +16,17 @@ type HealthSummary struct {
 }
 
 type SourceHealthSummary struct {
-	SourceID string `json:"source_id"`
-	Status   string `json:"status"`
-	Fetched  int    `json:"fetched"`
-	Stored   int    `json:"stored"`
-	Skipped  int    `json:"skipped"`
-	Message  string `json:"message,omitempty"`
+	SourceID         string         `json:"source_id"`
+	Status           string         `json:"status"`
+	Fetched          int            `json:"fetched"`
+	Normalized       int            `json:"normalized"`
+	Stored           int            `json:"stored"`
+	Skipped          int            `json:"skipped"`
+	AdapterSkipped   int            `json:"adapter_skipped"`
+	QualityRejected  int            `json:"quality_rejected"`
+	StoreFailed      int            `json:"store_failed"`
+	RejectionReasons map[string]int `json:"rejection_reasons,omitempty"`
+	Message          string         `json:"message,omitempty"`
 }
 
 type FailureSummary struct {
@@ -36,12 +41,17 @@ func HealthFromDryRun(now time.Time, result ingestion.RunResult) HealthSummary {
 	var failures []FailureSummary
 	for _, source := range result.Sources {
 		sourceHealth = append(sourceHealth, SourceHealthSummary{
-			SourceID: source.SourceID,
-			Status:   source.Status,
-			Fetched:  source.Fetched,
-			Stored:   source.Stored,
-			Skipped:  source.Skipped,
-			Message:  source.Message,
+			SourceID:         source.SourceID,
+			Status:           source.Status,
+			Fetched:          source.Fetched,
+			Normalized:       source.Normalized,
+			Stored:           source.Stored,
+			Skipped:          source.Skipped,
+			AdapterSkipped:   source.AdapterSkipped,
+			QualityRejected:  source.QualityRejected,
+			StoreFailed:      source.StoreFailed,
+			RejectionReasons: cloneCounts(source.RejectionReasons),
+			Message:          source.Message,
 		})
 		if source.Status == ingestion.StatusFailed || source.Status == ingestion.StatusConfigError {
 			status = "degraded"
@@ -59,4 +69,15 @@ func HealthFromDryRun(now time.Time, result ingestion.RunResult) HealthSummary {
 		SubscriberCount: 0,
 		RecentFailures:  failures,
 	}
+}
+
+func cloneCounts(values map[string]int) map[string]int {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]int, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }

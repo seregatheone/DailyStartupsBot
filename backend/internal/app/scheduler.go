@@ -322,11 +322,19 @@ func (pipeline *ScheduledPipeline) defaultPreferences(telegramID int64) storage.
 
 func (pipeline *ScheduledPipeline) logIngestion(result ingestion.RunResult) {
 	fetched, normalized, stored, skipped := 0, 0, 0, 0
+	adapterSkipped, qualityRejected, storeFailed := 0, 0, 0
+	rejectionReasons := make(map[string]int)
 	for _, source := range result.Sources {
 		fetched += source.Fetched
 		normalized += source.Normalized
 		stored += source.Stored
 		skipped += source.Skipped
+		adapterSkipped += source.AdapterSkipped
+		qualityRejected += source.QualityRejected
+		storeFailed += source.StoreFailed
+		for reason, count := range source.RejectionReasons {
+			rejectionReasons[reason] += count
+		}
 		pipeline.log().Info(
 			"source_ingestion",
 			"source_id", source.SourceID,
@@ -335,6 +343,10 @@ func (pipeline *ScheduledPipeline) logIngestion(result ingestion.RunResult) {
 			"normalized", source.Normalized,
 			"stored", source.Stored,
 			"skipped", source.Skipped,
+			"adapter_skipped", source.AdapterSkipped,
+			"quality_rejected", source.QualityRejected,
+			"store_failed", source.StoreFailed,
+			"rejection_reasons", source.RejectionReasons,
 		)
 	}
 	pipeline.log().Info(
@@ -344,6 +356,10 @@ func (pipeline *ScheduledPipeline) logIngestion(result ingestion.RunResult) {
 		"normalized", normalized,
 		"stored", stored,
 		"skipped", skipped,
+		"adapter_skipped", adapterSkipped,
+		"quality_rejected", qualityRejected,
+		"store_failed", storeFailed,
+		"rejection_reasons", rejectionReasons,
 	)
 }
 

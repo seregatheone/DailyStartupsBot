@@ -42,6 +42,7 @@ type Item struct {
 	Signals     []storage.StartupSignal
 	Score       int
 	PublishedAt time.Time
+	identity    string
 }
 
 type SourceAttribution struct {

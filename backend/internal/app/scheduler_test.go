@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -303,6 +305,26 @@ func TestScheduledPipelinePreservesSourceCadenceAcrossRestart(t *testing.T) {
 		t.Fatalf("restart repeated source inside cadence: attempts=%d result=%#v err=%v", attempts, restartResult, err)
 	}
 
+}
+
+func TestScheduledPipelineLogsStructuredRejectionAccounting(t *testing.T) {
+	var output bytes.Buffer
+	pipeline := ScheduledPipeline{logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	pipeline.logIngestion(ingestion.RunResult{Sources: []ingestion.SourceResult{{
+		SourceID: "source", Status: ingestion.StatusOK,
+		Fetched: 4, Normalized: 1, Stored: 1, Skipped: 3,
+		AdapterSkipped: 2, QualityRejected: 1, StoreFailed: 0,
+		RejectionReasons: map[string]int{"adapter_rejected": 2, "stale": 1},
+	}}})
+	logged := output.String()
+	for _, expected := range []string{
+		`"adapter_skipped":2`, `"quality_rejected":1`, `"store_failed":0`,
+		`"adapter_rejected":2`, `"stale":1`,
+	} {
+		if !strings.Contains(logged, expected) {
+			t.Fatalf("structured ingestion log lacks %s: %s", expected, logged)
+		}
+	}
 }
 
 func seedSubscription(
