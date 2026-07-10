@@ -13,6 +13,7 @@ func (generator Generator) score(item Item, preferences storage.Preferences) int
 	score += signalWeight(item.SignalType)
 	score += fundingScore(item.Funding)
 	score += categoryScore(item.Categories, preferences.Categories)
+	score += regionScore(item.Region, preferences.Regions)
 	score += len(item.Sources) * 5
 	for _, source := range item.Sources {
 		score += generator.SourcePriorities[source.SourceID]
@@ -79,6 +80,18 @@ func categoryScore(categories, preferred []string) int {
 		}
 	}
 	return score
+}
+
+func regionScore(region string, preferred []string) int {
+	if region == "" || len(preferred) == 0 {
+		return 0
+	}
+	for _, preferredRegion := range preferred {
+		if strings.EqualFold(region, preferredRegion) {
+			return 25
+		}
+	}
+	return 0
 }
 
 func parsePayload(raw string) rawSignalPayload {

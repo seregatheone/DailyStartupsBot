@@ -3,6 +3,7 @@ package ingestion
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,7 +94,7 @@ func TestServiceIsolatesSourceFailures(t *testing.T) {
 	ctx := context.Background()
 	store := &memoryStore{}
 	okAdapter := fakeAdapter{id: "ok", accessMethod: "api", records: []SourceRecord{validRecord("GoodCo")}}
-	failingAdapter := fakeAdapter{id: "fail", accessMethod: "api", err: errors.New("source unavailable")}
+	failingAdapter := fakeAdapter{id: "fail", accessMethod: "api", err: errors.New("source unavailable token=secret-token")}
 	service := NewService(NewRegistry(okAdapter, failingAdapter), store)
 
 	result, err := service.Run(ctx, []config.SourceConfig{
@@ -110,8 +111,35 @@ func TestServiceIsolatesSourceFailures(t *testing.T) {
 	if store.health["fail"].Status != StatusFailed {
 		t.Fatalf("expected failed source health, got %#v", store.health["fail"])
 	}
+	if store.health["fail"].LastError != sourceFetchFailure ||
+		strings.Contains(store.health["fail"].LastError, "secret-token") ||
+		strings.Contains(result.Sources[0].Message, "secret-token") {
+		t.Fatalf("source failure leaked raw detail: result=%#v health=%#v", result.Sources[0], store.health["fail"])
+	}
 	if store.health["ok"].Status != StatusOK {
 		t.Fatalf("expected ok source health, got %#v", store.health["ok"])
+	}
+}
+
+func TestServiceReturnsRecoverableErrorWhenSignalPersistenceFails(t *testing.T) {
+	ctx := context.Background()
+	store := &memoryStore{signalErr: errors.New("database unavailable")}
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "api", records: []SourceRecord{validRecord("RetryCo")},
+	}), store)
+
+	result, err := service.Run(ctx, []config.SourceConfig{
+		{ID: "source", Active: true, AccessMethod: "api"},
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "store signal for source source") {
+		t.Fatalf("expected recoverable persistence error, got %v", err)
+	}
+	if len(result.Sources) != 1 || result.Sources[0].Status != StatusFailed || result.Sources[0].Stored != 0 {
+		t.Fatalf("unexpected failed persistence result: %#v", result.Sources)
+	}
+	if store.health["source"].Status != StatusFailed {
+		t.Fatalf("expected failed health state, got %#v", store.health["source"])
 	}
 }
 
@@ -149,11 +177,15 @@ func (adapter fakeAdapter) Fetch(context.Context, config.SourceConfig) ([]Source
 }
 
 type memoryStore struct {
-	signals []storage.StartupSignal
-	health  map[string]storage.SourceHealth
+	signals   []storage.StartupSignal
+	health    map[string]storage.SourceHealth
+	signalErr error
 }
 
 func (store *memoryStore) SaveStartupSignal(_ context.Context, signal storage.StartupSignal) error {
+	if store.signalErr != nil {
+		return store.signalErr
+	}
 	store.signals = append(store.signals, signal)
 	return nil
 }

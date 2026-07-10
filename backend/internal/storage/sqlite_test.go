@@ -81,6 +81,117 @@ func TestSQLiteRepositoryPersistsStateAcrossReinitialization(t *testing.T) {
 	assertEqual(t, []DeliveryAttempt{attempt}, gotAttempts)
 }
 
+func TestListActiveSubscribersFiltersAndOrders(t *testing.T) {
+	ctx := context.Background()
+	repo, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "subscribers.db"))
+	must(t, err)
+	defer repo.Close()
+
+	createdAt := time.Date(2026, 7, 10, 7, 0, 0, 0, time.UTC)
+	for _, subscriber := range []Subscriber{
+		{TelegramID: 30, Username: "third", Active: true, CreatedAt: createdAt.Add(2 * time.Minute)},
+		{TelegramID: 10, Username: "inactive", Active: false, CreatedAt: createdAt},
+		{TelegramID: 20, Username: "second", Active: true, CreatedAt: createdAt.Add(time.Minute)},
+	} {
+		must(t, repo.SaveSubscriber(ctx, subscriber))
+	}
+
+	subscribers, err := repo.ListActiveSubscribers(ctx)
+	must(t, err)
+	assertEqual(t, []Subscriber{
+		{TelegramID: 20, Username: "second", Active: true, CreatedAt: createdAt.Add(time.Minute)},
+		{TelegramID: 30, Username: "third", Active: true, CreatedAt: createdAt.Add(2 * time.Minute)},
+	}, subscribers)
+}
+
+func TestListStartupSignalsUsesUTCHalfOpenWindowAndStableOrder(t *testing.T) {
+	ctx := context.Background()
+	repo, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "signals.db"))
+	must(t, err)
+	defer repo.Close()
+
+	moscow := time.FixedZone("UTC+3", 3*60*60)
+	from := time.Date(2026, 7, 10, 10, 0, 0, 0, moscow)
+	until := from.Add(time.Hour)
+	for _, signal := range []StartupSignal{
+		{ID: "at-until", StartupName: "Later", SourceID: "source", SourceURL: "https://source/until", SignalType: "news", PublishedAt: until},
+		{ID: "same-b", StartupName: "B", SourceID: "source", SourceURL: "https://source/b", SignalType: "news", PublishedAt: from},
+		{ID: "after-start", StartupName: "After start", SourceID: "source", SourceURL: "https://source/after", SignalType: "news", PublishedAt: from.Add(time.Nanosecond)},
+		{ID: "before", StartupName: "Before", SourceID: "source", SourceURL: "https://source/before", SignalType: "news", PublishedAt: from.Add(-time.Second)},
+		{ID: "before-until", StartupName: "Before until", SourceID: "source", SourceURL: "https://source/before-until", SignalType: "news", PublishedAt: until.Add(-time.Nanosecond)},
+		{ID: "middle", StartupName: "Middle", SourceID: "source", SourceURL: "https://source/middle", SignalType: "news", PublishedAt: from.Add(30 * time.Minute)},
+		{ID: "same-a", StartupName: "A", SourceID: "source", SourceURL: "https://source/a", SignalType: "news", PublishedAt: from},
+	} {
+		must(t, repo.SaveStartupSignal(ctx, signal))
+	}
+
+	signals, err := repo.ListStartupSignals(ctx, from, until)
+	must(t, err)
+	if len(signals) != 5 {
+		t.Fatalf("expected five signals in half-open window, got %#v", signals)
+	}
+	if got := []string{signals[0].ID, signals[1].ID, signals[2].ID, signals[3].ID, signals[4].ID}; !reflect.DeepEqual(got, []string{"same-a", "same-b", "after-start", "middle", "before-until"}) {
+		t.Fatalf("unexpected signal order: %#v", got)
+	}
+	for _, signal := range signals {
+		if signal.PublishedAt.Location() != time.UTC {
+			t.Fatalf("expected UTC published time, got %s", signal.PublishedAt.Location())
+		}
+	}
+}
+
+func TestSaveDigestSnapshotReplacesItemsAtomically(t *testing.T) {
+	ctx := context.Background()
+	repo, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "digest-snapshot.db"))
+	must(t, err)
+	defer repo.Close()
+
+	now := time.Date(2026, 7, 10, 7, 0, 0, 0, time.UTC)
+	run := DigestRun{ID: "digest", DigestDate: "2026-07-10", Timezone: "UTC", CreatedAt: now}
+	initialItems := []DigestItem{
+		{ID: "old-second", DigestID: run.ID, StartupName: "Second", Summary: "Second summary", Rank: 2},
+		{ID: "old-first", DigestID: run.ID, StartupName: "First", Summary: "First summary", Rank: 1},
+	}
+	must(t, repo.SaveDigestSnapshot(ctx, run, initialItems))
+
+	replacementRun := run
+	replacementRun.CreatedAt = now.Add(time.Minute)
+	replacementItems := []DigestItem{{
+		ID: "replacement", DigestID: run.ID, StartupName: "Replacement", Summary: "New summary", Rank: 1, SourceURLs: []string{},
+	}}
+	must(t, repo.SaveDigestSnapshot(ctx, replacementRun, replacementItems))
+
+	gotRun, gotItems, err := repo.GetDigestRun(ctx, run.ID)
+	must(t, err)
+	assertEqual(t, replacementRun, gotRun)
+	assertEqual(t, replacementItems, gotItems)
+
+	_, err = repo.db.ExecContext(ctx, `
+CREATE TRIGGER reject_digest_item
+BEFORE INSERT ON digest_items
+WHEN NEW.id = 'reject'
+BEGIN
+	SELECT RAISE(ABORT, 'rejected by test');
+END
+`)
+	must(t, err)
+
+	failedRun := replacementRun
+	failedRun.CreatedAt = now.Add(2 * time.Minute)
+	err = repo.SaveDigestSnapshot(ctx, failedRun, []DigestItem{
+		{ID: "would-replace", DigestID: run.ID, StartupName: "Transient", Rank: 1},
+		{ID: "reject", DigestID: run.ID, StartupName: "Rejected", Rank: 2},
+	})
+	if err == nil {
+		t.Fatal("expected snapshot insert failure")
+	}
+
+	gotRun, gotItems, err = repo.GetDigestRun(ctx, run.ID)
+	must(t, err)
+	assertEqual(t, replacementRun, gotRun)
+	assertEqual(t, replacementItems, gotItems)
+}
+
 func TestSQLiteRepositoryNormalizesPreferenceItemLimit(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "legacy-preferences.db")

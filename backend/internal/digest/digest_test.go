@@ -64,6 +64,23 @@ func TestGenerateRanksCategoryAndFundingMatchesHigher(t *testing.T) {
 	}
 }
 
+func TestGenerateRanksPreferredRegionHigher(t *testing.T) {
+	generator := Generator{}
+	request := Request{
+		Preferences: storage.Preferences{Regions: []string{"EU"}, MaxItems: 2},
+		Signals: []storage.StartupSignal{
+			{ID: "1", StartupName: "US Co", CanonicalURL: "https://us.example", SourceID: "source", SourceURL: "https://source/us", SignalType: "launch", Region: "US"},
+			{ID: "2", StartupName: "EU Co", CanonicalURL: "https://eu.example", SourceID: "source", SourceURL: "https://source/eu", SignalType: "launch", Region: "eu"},
+		},
+	}
+
+	generated := generator.Generate(request)
+
+	if generated.Items[0].StartupName != "EU Co" {
+		t.Fatalf("expected preferred region first, got %#v", generated.Items)
+	}
+}
+
 func TestGenerateEnforcesProductItemLimit(t *testing.T) {
 	signals := make([]storage.StartupSignal, 0, 12)
 	for index := 1; index <= 12; index++ {

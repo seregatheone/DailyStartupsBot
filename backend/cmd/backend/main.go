@@ -67,6 +67,15 @@ func runLiveBackend(ctx context.Context, cfg config.Config, logger *slog.Logger)
 		Handler:           httpapi.NewServer(cfg, repository),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	workerContext, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+	pipeline := app.NewScheduledPipeline(cfg, repository, logger)
+	pipelineDone := make(chan struct{})
+	go func() {
+		defer close(pipelineDone)
+		pipeline.Run(workerContext)
+	}()
+
 	serverErrors := make(chan error, 1)
 	logger.Info("backend_listening", "address", listener.Addr().String())
 	go func() {
@@ -75,18 +84,45 @@ func runLiveBackend(ctx context.Context, cfg config.Config, logger *slog.Logger)
 
 	select {
 	case <-ctx.Done():
+		cancelWorkers()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := server.Shutdown(shutdownContext); err != nil {
-			return fmt.Errorf("shutdown backend: %w", err)
+		shutdownErr := server.Shutdown(shutdownContext)
+		pipelineErr := waitForPipeline(shutdownContext, pipelineDone)
+		if shutdownErr != nil {
+			return fmt.Errorf("shutdown backend: %w", shutdownErr)
+		}
+		if pipelineErr != nil {
+			return pipelineErr
 		}
 		if err := <-serverErrors; !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve backend during shutdown: %w", err)
 		}
 	case err := <-serverErrors:
+		cancelWorkers()
+		workerShutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if pipelineErr := waitForPipeline(workerShutdownContext, pipelineDone); pipelineErr != nil {
+			return errors.Join(fmt.Errorf("serve backend: %w", err), pipelineErr)
+		}
+
 		if !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve backend: %w", err)
 		}
 	}
 	return nil
+}
+
+func waitForPipeline(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("shutdown scheduled pipeline: %w", ctx.Err())
+	}
 }
