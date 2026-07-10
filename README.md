@@ -46,6 +46,8 @@ make run-backend
 curl --fail http://127.0.0.1:8080/health
 ```
 
+`make run-backend` запускает local HTTP API и timezone-aware scheduled pipeline для ingestion, персональных digest snapshots и delivery queue. `make dry-run-backend` выполняет один безопасный sample cycle без Telegram send calls.
+
 В новом приватном чате с ботом отправьте `/start`. Ожидаемый короткий ответ:
 
 > DailyStartupsBot присылает краткий ежедневный дайджест стартапов. Отправьте /subscribe, чтобы подписаться.

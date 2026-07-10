@@ -18,14 +18,17 @@ type Repository interface {
 	SaveSubscriber(context.Context, Subscriber) error
 	SaveSubscription(context.Context, Subscriber, Preferences) (Subscriber, error)
 	GetSubscriber(context.Context, int64) (Subscriber, error)
+	ListActiveSubscribers(context.Context) ([]Subscriber, error)
 	SavePreferences(context.Context, Preferences) error
 	GetPreferences(context.Context, int64) (Preferences, error)
 	SaveSourceHealth(context.Context, SourceHealth) error
 	GetSourceHealth(context.Context, string) (SourceHealth, error)
 	SaveStartupSignal(context.Context, StartupSignal) error
 	GetStartupSignal(context.Context, string) (StartupSignal, error)
+	ListStartupSignals(context.Context, time.Time, time.Time) ([]StartupSignal, error)
 	SaveDigestRun(context.Context, DigestRun) error
 	SaveDigestItem(context.Context, DigestItem) error
+	SaveDigestSnapshot(context.Context, DigestRun, []DigestItem) error
 	GetDigestRun(context.Context, string) (DigestRun, []DigestItem, error)
 	SaveDelivery(context.Context, Delivery) error
 	DeliveryExists(context.Context, int64, string) (bool, error)
@@ -212,6 +215,39 @@ WHERE telegram_id = ?
 	return subscriber, nil
 }
 
+func (repo *SQLiteRepository) ListActiveSubscribers(ctx context.Context) ([]Subscriber, error) {
+	rows, err := repo.db.QueryContext(ctx, `
+SELECT telegram_id, username, active, created_at
+FROM subscribers
+WHERE active = 1
+ORDER BY telegram_id ASC
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	subscribers := make([]Subscriber, 0)
+	for rows.Next() {
+		var subscriber Subscriber
+		var createdAt string
+		if err := rows.Scan(
+			&subscriber.TelegramID,
+			&subscriber.Username,
+			&subscriber.Active,
+			&createdAt,
+		); err != nil {
+			return nil, err
+		}
+		subscriber.CreatedAt = parseStoredTime(createdAt)
+		subscribers = append(subscribers, subscriber)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return subscribers, nil
+}
+
 func (repo *SQLiteRepository) SavePreferences(ctx context.Context, preferences Preferences) error {
 	preferences.MaxItems = normalizeMaxItems(preferences.MaxItems)
 	regions, err := marshalStrings(preferences.Regions)
@@ -311,6 +347,52 @@ WHERE id = ?
 	return signal, nil
 }
 
+func (repo *SQLiteRepository) ListStartupSignals(ctx context.Context, from, until time.Time) ([]StartupSignal, error) {
+	rows, err := repo.db.QueryContext(ctx, `
+SELECT id, startup_name, canonical_url, source_id, source_url, signal_type, published_at, description, region, raw_payload
+FROM startup_signals
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	signals := make([]StartupSignal, 0)
+	for rows.Next() {
+		var signal StartupSignal
+		var publishedAt string
+		if err := rows.Scan(
+			&signal.ID,
+			&signal.StartupName,
+			&signal.CanonicalURL,
+			&signal.SourceID,
+			&signal.SourceURL,
+			&signal.SignalType,
+			&publishedAt,
+			&signal.Description,
+			&signal.Region,
+			&signal.RawPayload,
+		); err != nil {
+			return nil, err
+		}
+		signal.PublishedAt = parseStoredTime(publishedAt)
+		if signal.PublishedAt.Before(from) || !signal.PublishedAt.Before(until) {
+			continue
+		}
+		signals = append(signals, signal)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(signals, func(left, right int) bool {
+		if signals[left].PublishedAt.Equal(signals[right].PublishedAt) {
+			return signals[left].ID < signals[right].ID
+		}
+		return signals[left].PublishedAt.Before(signals[right].PublishedAt)
+	})
+	return signals, nil
+}
+
 func (repo *SQLiteRepository) SaveDigestRun(ctx context.Context, run DigestRun) error {
 	_, err := repo.db.ExecContext(ctx, `
 INSERT INTO digest_runs (id, digest_date, timezone, created_at)
@@ -339,6 +421,54 @@ ON CONFLICT(id) DO UPDATE SET
 	source_urls_json = excluded.source_urls_json
 `, item.ID, item.DigestID, item.StartupName, item.Summary, item.Rank, sourceURLs)
 	return err
+}
+
+func (repo *SQLiteRepository) SaveDigestSnapshot(ctx context.Context, run DigestRun, items []DigestItem) error {
+	orderedItems := append([]DigestItem(nil), items...)
+	sort.SliceStable(orderedItems, func(left, right int) bool {
+		if orderedItems[left].Rank == orderedItems[right].Rank {
+			return orderedItems[left].ID < orderedItems[right].ID
+		}
+		return orderedItems[left].Rank < orderedItems[right].Rank
+	})
+	for _, item := range orderedItems {
+		if item.DigestID != run.ID {
+			return fmt.Errorf("digest item %q belongs to %q, expected %q", item.ID, item.DigestID, run.ID)
+		}
+	}
+
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO digest_runs (id, digest_date, timezone, created_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	digest_date = excluded.digest_date,
+	timezone = excluded.timezone,
+	created_at = excluded.created_at
+`, run.ID, run.DigestDate, run.Timezone, formatTime(run.CreatedAt)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM digest_items WHERE digest_id = ?`, run.ID); err != nil {
+		return err
+	}
+	for _, item := range orderedItems {
+		sourceURLs, err := marshalStrings(item.SourceURLs)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO digest_items (id, digest_id, startup_name, summary, rank, source_urls_json)
+VALUES (?, ?, ?, ?, ?, ?)
+`, item.ID, item.DigestID, item.StartupName, item.Summary, item.Rank, sourceURLs); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (repo *SQLiteRepository) GetDigestRun(ctx context.Context, id string) (DigestRun, []DigestItem, error) {
