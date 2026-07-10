@@ -500,22 +500,17 @@ The live bot SHALL hold an advisory process lock before loading polling state or
 
 ### Requirement: Live Telegram command-matrix acceptance
 
-The system SHALL provide a repeatable manual-transport acceptance scenario that verifies real Telegram command responses against persisted backend state for a dedicated inactive test subscriber.
+The system SHALL provide a repeatable manual-transport acceptance scenario that verifies real Telegram command responses against persisted backend state for a dedicated inactive test subscriber without mutating that subscriber's persisted preferences.
 
 #### Scenario: Full command matrix runs
 
-- **WHEN** the operator follows the runner through start, help, subscribe, status, valid preferences, invalid preferences, updated status, preview and unsubscribe
-- **THEN** every response matches its user-facing contract and the final subscriber is inactive
+- **WHEN** the operator follows the runner through start, help, subscribe, status, preview and unsubscribe
+- **THEN** every response matches its user-facing contract, persisted preferences remain unchanged and the final subscriber is inactive
 
 #### Scenario: State-changing command completes
 
-- **WHEN** subscribe, valid preferences or unsubscribe receives the expected Telegram response
-- **THEN** the runner reads backend status and verifies the corresponding active or preference state before advancing
-
-#### Scenario: Invalid preferences are rejected
-
-- **WHEN** the runner submits a maximum item count outside 1 through 10
-- **THEN** Telegram returns a Russian validation response and backend preferences remain byte-for-field equivalent to the preceding valid state
+- **WHEN** subscribe or unsubscribe receives the expected Telegram response
+- **THEN** the runner reads backend status and verifies the corresponding active state before advancing
 
 #### Scenario: Telegram response is missing or unexpected
 

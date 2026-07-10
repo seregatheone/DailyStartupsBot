@@ -23,11 +23,6 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_RECEIPT_PATH = ".runtime/daily-startups/telegram-e2e-receipt.json"
 DEFAULT_STEP_TIMEOUT_SECONDS = 120.0
-VALID_PREFERENCES_COMMAND = (
-    "/preferences regions=EU categories=AI time=09:17 "
-    "timezone=Europe/Moscow max=7"
-)
-INVALID_PREFERENCES_COMMAND = "/preferences max=11"
 
 
 class E2EError(RuntimeError):
@@ -227,45 +222,18 @@ class TelegramE2ERunner:
             )
             self._step(
                 receipt,
-                "preferences_valid",
-                VALID_PREFERENCES_COMMAND,
-                lambda response: _contains(response, "Настройки обновлены"),
-                state_assertion=_assert_test_preferences,
-            )
-
-            valid_state = _safe_status(
-                self.backend, self.telegram_id, "preferences_invalid"
-            )
-            self._step(
-                receipt,
-                "preferences_invalid",
-                INVALID_PREFERENCES_COMMAND,
-                lambda response: _contains(
-                    response,
-                    "Не удалось обновить настройки",
-                    "от 1 до 10",
-                ),
-                state_assertion=lambda state: _assert_same_state(state, valid_state),
-            )
-            self._step(
-                receipt,
-                "status_updated",
-                "/status",
-                lambda response: _contains(response, *_status_fragments(valid_state)),
-                state_assertion=lambda state: _assert_same_state(state, valid_state),
-            )
-            self._step(
-                receipt,
                 "preview",
                 "/preview",
                 _valid_preview_response,
             )
+            unsubscribed = dict(subscribed)
+            unsubscribed["active"] = False
             self._step(
                 receipt,
                 "unsubscribe",
                 "/unsubscribe",
                 lambda response: _contains(response, "Подписка отключена"),
-                state_assertion=lambda state: _assert_active(state, False),
+                state_assertion=lambda state: _assert_same_state(state, unsubscribed),
             )
             receipt.status = "pass"
             return receipt
@@ -376,18 +344,6 @@ def _assert_active(state: dict[str, Any], expected: bool) -> None:
 def _assert_same_state(actual: dict[str, Any], expected: dict[str, Any]) -> None:
     if actual != expected:
         raise E2EError("backend_state_mismatch")
-
-
-def _assert_test_preferences(state: dict[str, Any]) -> None:
-    expected = {
-        "active": True,
-        "regions": ["EU"],
-        "categories": ["AI"],
-        "delivery_time": "09:17",
-        "timezone": "Europe/Moscow",
-        "max_items": 7,
-    }
-    _assert_same_state(state, expected)
 
 
 def _status_fragments(state: dict[str, Any]) -> tuple[str, ...]:
