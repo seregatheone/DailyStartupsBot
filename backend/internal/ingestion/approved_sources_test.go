@@ -43,6 +43,11 @@ func TestAssembleRuntimeUsesCatalogAsSingleLiveSourceOwner(t *testing.T) {
 	if _, ok := wantByID[hackerNewsShowSourceID]; !ok {
 		t.Fatal("required productive Show HN source is missing from the live catalog")
 	}
+	for _, sourceID := range []string{techCrunchStartupsSourceID, euStartupsSourceID} {
+		if source, ok := wantByID[sourceID]; !ok || source.AccessMethod != "rss" {
+			t.Fatalf("required startup-news RSS source is missing: %s", sourceID)
+		}
+	}
 	registered, skipped := registry.Resolve(sources)
 	if len(registered) != len(catalog.Sources) || len(skipped) != 0 {
 		t.Fatalf("approved adapters were not registered: registered=%#v skipped=%#v", registered, skipped)
@@ -148,14 +153,14 @@ func TestApprovedSourceServiceIsolatesOneFeedFailure(t *testing.T) {
 	catalog := readTestCatalog(t)
 	adapters := make([]SourceAdapter, 0, len(catalog.Sources))
 	configs := make([]config.SourceConfig, 0, len(catalog.Sources))
-	failedID := catalog.Sources[0].ID
-	for index, source := range catalog.Sources {
+	failedID := techCrunchStartupsSourceID
+	for _, source := range catalog.Sources {
 		status := http.StatusOK
 		fixture, err := os.ReadFile(source.Fixture)
 		if err != nil {
 			t.Fatalf("read fixture: %v", err)
 		}
-		if index == 0 {
+		if source.ID == failedID {
 			status = http.StatusBadGateway
 		}
 		adapter, _ := approvedFixtureAdapter(t, source, status, fixture)
@@ -181,7 +186,7 @@ func TestApprovedSourceServiceIsolatesOneFeedFailure(t *testing.T) {
 }
 
 func TestDisabledApprovedSourceDoesNotFetchAndClearsFailedHealth(t *testing.T) {
-	source := readTestCatalog(t).Sources[0]
+	source := testCatalogSource(t, techCrunchStartupsSourceID)
 	fixture, err := os.ReadFile(source.Fixture)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -206,7 +211,7 @@ func TestDisabledApprovedSourceDoesNotFetchAndClearsFailedHealth(t *testing.T) {
 }
 
 func TestDisableAndReenablePreservesApprovedSourceCadence(t *testing.T) {
-	source := readTestCatalog(t).Sources[0]
+	source := testCatalogSource(t, euStartupsSourceID)
 	fixture, err := os.ReadFile(source.Fixture)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -259,6 +264,18 @@ func TestApprovedSourceMapperFailsClosedForAmbiguousHeadlines(t *testing.T) {
 		{sourceID: "innovate-uk", headline: "Acme raises seed round"},
 		{sourceID: "innovate-uk", headline: "Report: Acme launches a product"},
 		{sourceID: "innovate-uk", headline: "Startups receive new government support"},
+		{sourceID: techCrunchStartupsSourceID, headline: "Weekly round-up: startups that raised this week"},
+		{sourceID: techCrunchStartupsSourceID, headline: "Alpha and Beta raise $10 million"},
+		{sourceID: techCrunchStartupsSourceID, headline: "Northwind Ventures launches new fund"},
+		{sourceID: techCrunchStartupsSourceID, headline: "Acme raises awareness about security"},
+		{sourceID: techCrunchStartupsSourceID, headline: "Stealth startup raises $10 million"},
+		{sourceID: techCrunchStartupsSourceID, headline: "Former Google executive Jane Doe launches AI assistant"},
+		{sourceID: techCrunchStartupsSourceID, headline: "New AI platform launches in Europe"},
+		{sourceID: techCrunchStartupsSourceID, headline: "Acme launches marketing campaign"},
+		{sourceID: techCrunchStartupsSourceID, headline: "Acme debuts a podcast"},
+		{sourceID: euStartupsSourceID, headline: "Top 10 startups to watch in Europe"},
+		{sourceID: euStartupsSourceID, headline: "Acme acquires Beta"},
+		{sourceID: euStartupsSourceID, headline: "EU-Startups launches annual summit"},
 	}
 	for _, test := range tests {
 		t.Run(test.sourceID+"/"+test.headline, func(t *testing.T) {
@@ -270,6 +287,115 @@ func TestApprovedSourceMapperFailsClosedForAmbiguousHeadlines(t *testing.T) {
 				t.Fatalf("ambiguous headline was admitted: %q", test.headline)
 			}
 		})
+	}
+}
+
+func TestStartupNewsMapperAdmitsExplicitSingleCompanyEvents(t *testing.T) {
+	tests := []struct {
+		name        string
+		sourceID    string
+		headline    string
+		startupName string
+		signalType  string
+		amount      string
+		currency    string
+		round       string
+	}{
+		{
+			name: "techcrunch funding", sourceID: techCrunchStartupsSourceID,
+			headline:    "LedgerLeap raises $18 million Series A for treasury automation",
+			startupName: "LedgerLeap", signalType: "funding", amount: "18 million", currency: "USD", round: "series a",
+		},
+		{
+			name: "eu launch with location prefix", sourceID: euStartupsSourceID,
+			headline:    "Barcelona-based SolaraGrid launches energy forecasting platform",
+			startupName: "SolaraGrid", signalType: "launch",
+		},
+		{
+			name: "market entry", sourceID: euStartupsSourceID,
+			headline:    "OrbitPay enters the German market",
+			startupName: "OrbitPay", signalType: "launch",
+		},
+		{
+			name: "secured seed funding", sourceID: euStartupsSourceID,
+			headline:    "Pinecone secures €4 million seed round",
+			startupName: "Pinecone", signalType: "funding", amount: "4 million", currency: "EUR", round: "seed",
+		},
+		{
+			name: "closed round", sourceID: techCrunchStartupsSourceID,
+			headline:    "Beacon closes Series B funding round",
+			startupName: "Beacon", signalType: "funding", round: "series b",
+		},
+		{
+			name: "product debut", sourceID: techCrunchStartupsSourceID,
+			headline:    "Nova debuts commerce platform",
+			startupName: "Nova", signalType: "launch",
+		},
+		{
+			name: "market expansion", sourceID: euStartupsSourceID,
+			headline:    "OrbitPay expands into Germany",
+			startupName: "OrbitPay", signalType: "launch",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mapper := approvedSourceMapper(approvedSourcePolicies[test.sourceID])
+			record, err := mapper(FeedItem{
+				Title: test.headline, SourceURL: "https://publisher.example/article", PublishedAt: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Fatalf("explicit startup event was rejected: %v", err)
+			}
+			if record.StartupName != test.startupName || record.SignalType != test.signalType ||
+				record.Funding.Amount != test.amount || record.Funding.Currency != test.currency ||
+				record.Funding.Round != test.round || record.RawPayload != "" {
+				t.Fatalf("unexpected mapped startup-news record: %#v", record)
+			}
+		})
+	}
+}
+
+func TestStartupNewsRSSReportsZeroYieldWhenEveryHeadlineIsRejected(t *testing.T) {
+	source := testCatalogSource(t, techCrunchStartupsSourceID)
+	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>TechCrunch Startups</title>
+<item><title>Weekly round-up: startups that raised this week</title>
+<link>https://techcrunch.com/2026/07/09/weekly-round-up/</link>
+<guid>weekly-round-up</guid><pubDate>Thu, 09 Jul 2026 10:00:00 +0000</pubDate></item>
+</channel></rss>`)
+	adapter, requests := approvedFixtureAdapter(t, source, http.StatusOK, body)
+	store := &memoryStore{}
+	service := NewService(NewRegistry(adapter), store)
+	service.now = func() time.Time { return time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC) }
+
+	result, err := service.Run(context.Background(), []config.SourceConfig{{
+		ID: source.ID, Active: true, AccessMethod: source.AccessMethod,
+	}})
+	if err != nil {
+		t.Fatalf("run rejected startup-news feed: %v", err)
+	}
+	if requests.Load() != 1 || len(result.Signals) != 0 || len(result.Sources) != 1 ||
+		result.Sources[0].Status != StatusZeroYield || result.Sources[0].Fetched != 1 ||
+		result.Sources[0].AdapterSkipped != 1 || store.health[source.ID].Status != StatusZeroYield {
+		t.Fatalf("rejected non-empty RSS feed was not zero-yield: requests=%d result=%#v health=%#v", requests.Load(), result, store.health[source.ID])
+	}
+}
+
+func TestStartupNewsFundingRoundRequiresExplicitRound(t *testing.T) {
+	mapper := approvedSourceMapper(approvedSourcePolicies[techCrunchStartupsSourceID])
+	for _, headline := range []string{
+		"Acme raises $5 million for growth",
+		"Acme raises $5 million to seed expansion",
+	} {
+		record, err := mapper(FeedItem{
+			Title: headline, SourceURL: "https://techcrunch.com/acme", PublishedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("explicit funding was rejected for %q: %v", headline, err)
+		}
+		if record.Funding.Amount != "5 million" || record.Funding.Currency != "USD" || record.Funding.Round != "" {
+			t.Fatalf("non-round context invented a funding round for %q: %#v", headline, record.Funding)
+		}
 	}
 }
 
@@ -298,6 +424,14 @@ func approvedFixtureAdapter(
 	if err != nil {
 		t.Fatalf("parse fixture server URL: %v", err)
 	}
+	productionURL, err := url.Parse(source.FeedURL)
+	if err != nil {
+		t.Fatalf("parse production feed URL: %v", err)
+	}
+	policy, ok := approvedSourcePolicies[source.ID]
+	if !ok {
+		t.Fatalf("missing approved feed policy: %s", source.ID)
+	}
 	adapter, err := NewFeedAdapter(FeedAdapterOptions{
 		ID:                  source.ID,
 		DisplayName:         source.DisplayName,
@@ -305,8 +439,8 @@ func approvedFixtureAdapter(
 		AccessMethod:        source.AccessMethod,
 		FetchCadence:        "60m",
 		RateLimit:           source.RequestPolicy.RateLimit,
-		Tags:                []string{"public", "govuk", "startup"},
-		AllowedHosts:        []string{parsed.Host, "www.gov.uk"},
+		Tags:                append([]string(nil), policy.Tags...),
+		AllowedHosts:        []string{parsed.Host, productionURL.Host},
 		AllowedContentTypes: []string{source.AccessEvidence.ContentType},
 		Timeout:             time.Duration(source.RequestPolicy.TimeoutSeconds) * time.Second,
 		MaxRedirects:        source.RequestPolicy.MaxRedirects,
@@ -314,7 +448,7 @@ func approvedFixtureAdapter(
 		MaxItems:            source.RequestPolicy.MaxItems,
 		UserAgent:           DefaultFeedUserAgent,
 		Transport:           server.Client().Transport,
-		Mapper:              approvedSourceMapper(approvedSourcePolicies[source.ID]),
+		Mapper:              approvedSourceMapper(policy),
 		QualityPolicy: QualityPolicy{
 			MaxAge:        time.Duration(source.ExpectedFreshnessHours) * time.Hour,
 			MaxFutureSkew: 15 * time.Minute,
@@ -418,4 +552,15 @@ func readTestCatalog(t *testing.T) catalogContract {
 		t.Fatalf("decode source catalog: %v", err)
 	}
 	return catalog
+}
+
+func testCatalogSource(t *testing.T, sourceID string) catalogSource {
+	t.Helper()
+	for _, source := range readTestCatalog(t).Sources {
+		if source.ID == sourceID {
+			return source
+		}
+	}
+	t.Fatalf("catalog source not found: %s", sourceID)
+	return catalogSource{}
 }

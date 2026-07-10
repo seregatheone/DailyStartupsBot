@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+  xmlns:content="http://purl.org/rss/1.0/modules/content/"
+  xmlns:dc="http://purl.org/dc/elements/1.1/"
+  xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>TechCrunch Startups</title>
+    <link>https://techcrunch.com/category/startups/</link>
+    <description>Startup news from TechCrunch.</description>
+    <item>
+      <title>LedgerLeap raises $18 million Series A for treasury automation</title>
+      <link>https://techcrunch.com/2026/07/09/ledgerleap-raises-series-a/</link>
+      <guid isPermaLink="false">techcrunch-ledgerleap-2026</guid>
+      <pubDate>Thu, 09 Jul 2026 10:00:00 +0000</pubDate>
+      <description><![CDATA[LedgerLeap builds treasury automation for growing companies.]]></description>
+      <dc:creator>Fixture Author</dc:creator>
+      <content:encoded><![CDATA[<p>Full article body must never be mapped or stored.</p>]]></content:encoded>
+      <media:content url="https://techcrunch.com/fixture-image.jpg" medium="image" />
+    </item>
+  </channel>
+</rss>

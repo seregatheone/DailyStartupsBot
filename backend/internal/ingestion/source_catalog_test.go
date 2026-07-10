@@ -37,6 +37,7 @@ type catalogSource struct {
 	AttributionLabel   string   `json:"attribution_label"`
 	AttributionNotice  string   `json:"attribution_notice"`
 	ReusePolicy        string   `json:"reuse_policy"`
+	ReuseMode          string   `json:"reuse_mode"`
 	ReuseRequirements  []string `json:"reuse_requirements"`
 	AccessMethod       string   `json:"access_method"`
 	Credentials        []string `json:"credentials"`
@@ -109,6 +110,20 @@ type hackerNewsFixture struct {
 	Items    []hackerNewsItem `json:"items"`
 }
 
+type rssFixture struct {
+	XMLName xml.Name `xml:"rss"`
+	Channel struct {
+		Title string `xml:"title"`
+		Items []struct {
+			Title       string `xml:"title"`
+			Link        string `xml:"link"`
+			GUID        string `xml:"guid"`
+			PublishedAt string `xml:"pubDate"`
+			Description string `xml:"description"`
+		} `xml:"item"`
+	} `xml:"channel"`
+}
+
 var (
 	eventHeadline = regexp.MustCompile(`(?i)^(.+?)\s+(raises|secures|launches)\b`)
 	fundingAmount = regexp.MustCompile(`(?i)([£$€])(\d+(?:\.\d+)?)\s*(million|billion|m|bn)\b`)
@@ -149,7 +164,7 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 			}
 			seenIDs[source.ID] = true
 			if source.DisplayName == "" || source.Status != "approved" ||
-				(source.AccessMethod != "atom" && source.AccessMethod != "api") {
+				(source.AccessMethod != "atom" && source.AccessMethod != "api" && source.AccessMethod != "rss") {
 				t.Fatal("source identity or approval state is incomplete")
 			}
 			if len(source.Credentials) != 0 {
@@ -165,13 +180,21 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 				source.AttributionLabel == "" || source.AttributionNotice == "" {
 				t.Fatal("approved source lacks reuse and attribution requirements")
 			}
+			if !source.AccessEvidence.ReuseVerified && source.ReuseMode != "factual_metadata_only" {
+				t.Fatal("source without explicit reuse permission must be limited to factual metadata")
+			}
+			if source.ReuseMode != "" && source.ReuseMode != "factual_metadata_only" {
+				t.Fatalf("unsupported reuse mode: %q", source.ReuseMode)
+			}
 			if seenFeeds[source.FeedURL] {
 				t.Fatalf("feed URL is duplicated: %s", source.FeedURL)
 			}
 			seenFeeds[source.FeedURL] = true
-			wantContentType := map[string]string{"atom": "application/atom+xml", "api": "application/json"}[source.AccessMethod]
-			if !source.AccessEvidence.PublisherAdvertised || !source.AccessEvidence.ReuseVerified || source.AccessEvidence.ProbedAt == "" || source.AccessEvidence.HTTPStatus != 200 || source.AccessEvidence.ContentType != wantContentType {
-				t.Fatal("publisher access or reuse evidence is incomplete")
+			wantContentType := map[string]string{
+				"atom": "application/atom+xml", "api": "application/json", "rss": "application/rss+xml",
+			}[source.AccessMethod]
+			if !source.AccessEvidence.PublisherAdvertised || source.AccessEvidence.ProbedAt == "" || source.AccessEvidence.HTTPStatus != 200 || source.AccessEvidence.ContentType != wantContentType {
+				t.Fatal("publisher access evidence is incomplete")
 			}
 			policy := source.RequestPolicy
 			if policy.CadenceMinutes < 30 || policy.TimeoutSeconds < 1 || policy.TimeoutSeconds > 15 || policy.MaxRedirects < 0 || policy.MaxRedirects > 3 || policy.MaxResponseBytes < 1 || policy.MaxResponseBytes > 1<<20 || policy.MaxItems < 1 || policy.MaxItems > 100 || policy.RateLimit == "" || policy.RedirectPolicy == "" || !policy.UserAgentRequired {
@@ -211,6 +234,11 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 	if !seenIDs[hackerNewsShowSourceID] {
 		t.Fatal("catalog is missing the required Show HN launch source")
 	}
+	for _, sourceID := range []string{techCrunchStartupsSourceID, euStartupsSourceID} {
+		if !seenIDs[sourceID] {
+			t.Fatalf("catalog is missing required startup-news RSS source %q", sourceID)
+		}
+	}
 }
 
 func mapCatalogFixture(t *testing.T, source catalogSource) SourceRecord {
@@ -246,6 +274,39 @@ func mapCatalogFixture(t *testing.T, source catalogSource) SourceRecord {
 		record, ok := mapHackerNewsItem(fixture.StoryIDs[0], item)
 		if !ok {
 			t.Fatal("Hacker News fixture admitted story was rejected")
+		}
+		return record
+	}
+	if source.AccessMethod == "rss" {
+		if filepath.Ext(clean) != ".xml" {
+			t.Fatalf("RSS fixture must be XML: %q", fixturePath)
+		}
+		var fixture rssFixture
+		if err := xml.Unmarshal(data, &fixture); err != nil {
+			t.Fatal(err)
+		}
+		if fixture.XMLName.Local != "rss" || fixture.Channel.Title == "" || len(fixture.Channel.Items) != 1 {
+			t.Fatal("fixture must contain one RSS channel item")
+		}
+		item := fixture.Channel.Items[0]
+		publishedAt := parseFeedTime(item.PublishedAt)
+		if item.GUID == "" || item.Title == "" || item.Link == "" || publishedAt.IsZero() {
+			t.Fatal("RSS fixture lacks required identity, title, link or publication time")
+		}
+		policy, ok := approvedSourcePolicies[source.ID]
+		if !ok || !policy.StartupNews {
+			t.Fatalf("RSS fixture lacks startup-news policy: %s", source.ID)
+		}
+		record, err := approvedSourceMapper(policy)(FeedItem{
+			ID:          item.GUID,
+			Title:       plainText(item.Title, 240),
+			SourceURL:   strings.TrimSpace(item.Link),
+			PublishedAt: publishedAt,
+			Description: plainText(item.Description, 280),
+			Categories:  []string{},
+		})
+		if err != nil {
+			t.Fatalf("RSS fixture admitted item was rejected: %v", err)
 		}
 		return record
 	}
