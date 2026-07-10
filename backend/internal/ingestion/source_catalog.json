@@ -1,0 +1,347 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-07-10",
+  "global_policy": {
+    "access_scope": "Read only publisher-advertised public Atom endpoints; never scrape article HTML as fallback.",
+    "unknown_value_policy": "empty",
+    "attribution": "Every displayed signal names the publishing organisation, links the exact Atom entry source_url, and makes the Open Government Licence v3.0 attribution available.",
+    "breaking_format_change": "Fail closed, mark only that source degraded, keep other sources running, and require fixture plus catalog review before accepting the new format.",
+    "removal": "Disable fetching and public display immediately when the publisher withdraws the feed or reuse permission, access becomes authenticated or prohibited, mapping becomes unsafe, or attribution can no longer be preserved. Historical source metadata may remain only for internal audit.",
+    "content_policy": "Store title-derived metadata and a bounded plain-text Atom summary only. Do not mirror article bodies, images, logos, personal data, third-party works, or imply publisher endorsement."
+  },
+  "sources": [
+    {
+      "id": "innovate-uk",
+      "display_name": "Innovate UK",
+      "status": "approved",
+      "publisher_page_url": "https://www.gov.uk/government/organisations/innovate-uk",
+      "publisher_access_url": "https://www.gov.uk/government/organisations/innovate-uk",
+      "feed_url": "https://www.gov.uk/government/organisations/innovate-uk.atom",
+      "terms_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/",
+      "reuse_policy": "GOV.UK public-sector information is reusable under the Open Government Licence v3.0, including commercial and adapted use, subject to attribution and exclusions.",
+      "reuse_requirements": [
+        "Show Innovate UK as the publisher and link the original GOV.UK entry.",
+        "Link the Open Government Licence v3.0 where practical and indicate that the digest is a normalized summary.",
+        "Do not reuse excluded logos, personal data, third-party works, or imply official endorsement."
+      ],
+      "access_method": "atom",
+      "credentials": [],
+      "access_evidence": {
+        "publisher_advertised_feed": true,
+        "reuse_verified": true,
+        "probed_at": "2026-07-10",
+        "http_status": 200,
+        "content_type": "application/atom+xml"
+      },
+      "request_policy": {
+        "cadence_minutes": 60,
+        "timeout_seconds": 10,
+        "max_response_bytes": 1048576,
+        "max_items": 100,
+        "rate_limit": "at most one request per 60 minutes",
+        "redirect_policy": "maximum 3 redirects; final URL must remain HTTPS on www.gov.uk",
+        "user_agent_required": true
+      },
+      "expected_freshness_hours": 504,
+      "accepted_item_policy": "Accept only a headline that names one company before an explicit raises, secures, launches, wins, or receives event verb. Skip programme announcements, aggregate project lists, policy, advice, recruitment, reports, and articles without one unambiguous company subject.",
+      "field_mapping": {
+        "startup_name": {
+          "source": "entry.title",
+          "rule": "Extract the company text before an approved concrete-event verb; never take a programme, department, person, or consortium name.",
+          "on_missing": "skip"
+        },
+        "canonical_url": {
+          "source": "none",
+          "rule": "The Atom entry does not expose a structured company homepage; never treat the GOV.UK article as the startup canonical URL.",
+          "on_missing": "empty"
+        },
+        "source_url": {
+          "source": "entry.link[rel=alternate].href",
+          "rule": "Require an absolute HTTPS www.gov.uk URL and retain it exactly for OGL attribution.",
+          "on_missing": "skip"
+        },
+        "signal_type": {
+          "source": "entry.title",
+          "rule": "raises/secures/receives with explicit capital maps to funding; launches maps to launch; wins maps to award; other admitted concrete company events map to news.",
+          "on_missing": "news"
+        },
+        "published_at": {
+          "source": "entry.updated",
+          "rule": "Parse RFC 3339 with timezone and convert to UTC; never substitute fetch time.",
+          "on_missing": "skip"
+        },
+        "description": {
+          "source": "entry.summary",
+          "rule": "Strip markup, decode entities, collapse whitespace, and keep at most 280 Unicode characters of the feed-provided summary.",
+          "on_missing": "empty"
+        },
+        "region": {
+          "source": "none",
+          "rule": "A GOV.UK publication does not prove company incorporation or operating region.",
+          "on_missing": "empty"
+        },
+        "categories": {
+          "source": "none",
+          "rule": "This organization feed has no stable product taxonomy; leave empty until a reviewed allowlist exists.",
+          "on_missing": "empty"
+        },
+        "funding": {
+          "source": "entry.title",
+          "rule": "Populate amount, currency, and round only when explicitly present in the headline; investors remain empty.",
+          "on_missing": "empty"
+        },
+        "raw_payload": {
+          "source": "none",
+          "rule": "The adapter leaves RawPayload empty; NormalizeSignal derives bounded categories/funding JSON from the typed record and stores no raw feed body.",
+          "on_missing": "empty"
+        }
+      },
+      "fixture_expected": {
+        "startup_name": "Northstar Robotics",
+        "canonical_url": "",
+        "source_url": "https://www.gov.uk/government/news/northstar-robotics-growth-investment",
+        "signal_type": "funding",
+        "published_at": "2026-07-09T08:00:00Z",
+        "description": "Northstar Robotics develops inspection systems for offshore infrastructure.",
+        "region": "",
+        "categories": [],
+        "funding": {
+          "round": "growth",
+          "amount": "12 million",
+          "currency": "GBP",
+          "investors": []
+        },
+        "raw_payload": ""
+      },
+      "fallback_policy": {
+        "on_failure": "mark this source degraded and continue other sources",
+        "retry": "next scheduled cadence with bounded backoff",
+        "html_scraping": false,
+        "serve_stale_as_new": false
+      },
+      "fixture": "testdata/source_catalog/innovate-uk.xml"
+    },
+    {
+      "id": "uk-research-and-innovation",
+      "display_name": "UK Research and Innovation",
+      "status": "approved",
+      "publisher_page_url": "https://www.gov.uk/government/organisations/uk-research-and-innovation",
+      "publisher_access_url": "https://www.gov.uk/government/organisations/uk-research-and-innovation",
+      "feed_url": "https://www.gov.uk/government/organisations/uk-research-and-innovation.atom",
+      "terms_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/",
+      "reuse_policy": "GOV.UK public-sector information is reusable under the Open Government Licence v3.0, including commercial and adapted use, subject to attribution and exclusions.",
+      "reuse_requirements": [
+        "Show UK Research and Innovation as the publisher and link the original GOV.UK entry.",
+        "Link the Open Government Licence v3.0 where practical and indicate that the digest is a normalized summary.",
+        "Do not reuse excluded logos, personal data, third-party works, or imply official endorsement."
+      ],
+      "access_method": "atom",
+      "credentials": [],
+      "access_evidence": {
+        "publisher_advertised_feed": true,
+        "reuse_verified": true,
+        "probed_at": "2026-07-10",
+        "http_status": 200,
+        "content_type": "application/atom+xml"
+      },
+      "request_policy": {
+        "cadence_minutes": 60,
+        "timeout_seconds": 10,
+        "max_response_bytes": 1048576,
+        "max_items": 100,
+        "rate_limit": "at most one request per 60 minutes",
+        "redirect_policy": "maximum 3 redirects; final URL must remain HTTPS on www.gov.uk",
+        "user_agent_required": true
+      },
+      "expected_freshness_hours": 168,
+      "accepted_item_policy": "Accept only a single named spinout or company with a concrete launch, funding, award, acquisition, or commercial milestone in the headline. Skip research policy, university aggregates, grants without a named company, events, reports, jobs, and consortium-only announcements.",
+      "field_mapping": {
+        "startup_name": {
+          "source": "entry.title",
+          "rule": "Extract one company or spinout before an approved concrete-event verb; reject ambiguous institution and consortium headlines.",
+          "on_missing": "skip"
+        },
+        "canonical_url": {
+          "source": "none",
+          "rule": "The Atom entry has no structured company homepage; leave empty.",
+          "on_missing": "empty"
+        },
+        "source_url": {
+          "source": "entry.link[rel=alternate].href",
+          "rule": "Require an absolute HTTPS www.gov.uk URL and retain it exactly for OGL attribution.",
+          "on_missing": "skip"
+        },
+        "signal_type": {
+          "source": "entry.title",
+          "rule": "raises/secures/receives with explicit capital maps to funding; launches maps to launch; wins maps to award; an explicit acquisition maps to acquisition; other admitted events map to news.",
+          "on_missing": "news"
+        },
+        "published_at": {
+          "source": "entry.updated",
+          "rule": "Parse RFC 3339 with timezone and convert to UTC; never substitute fetch time.",
+          "on_missing": "skip"
+        },
+        "description": {
+          "source": "entry.summary",
+          "rule": "Strip markup, decode entities, collapse whitespace, and keep at most 280 Unicode characters of the feed-provided summary.",
+          "on_missing": "empty"
+        },
+        "region": {
+          "source": "none",
+          "rule": "Publisher scope and university location do not prove company region.",
+          "on_missing": "empty"
+        },
+        "categories": {
+          "source": "none",
+          "rule": "The feed has no stable product taxonomy; leave empty until a reviewed allowlist exists.",
+          "on_missing": "empty"
+        },
+        "funding": {
+          "source": "entry.title",
+          "rule": "Populate amount, currency, and round only when explicitly present in the headline; investors remain empty.",
+          "on_missing": "empty"
+        },
+        "raw_payload": {
+          "source": "none",
+          "rule": "The adapter leaves RawPayload empty; NormalizeSignal derives bounded categories/funding JSON from the typed record and stores no raw feed body.",
+          "on_missing": "empty"
+        }
+      },
+      "fixture_expected": {
+        "startup_name": "HelioGrid",
+        "canonical_url": "",
+        "source_url": "https://www.gov.uk/government/news/heliogrid-launches-grid-forecasting-pilot",
+        "signal_type": "launch",
+        "published_at": "2026-07-09T09:00:00Z",
+        "description": "HelioGrid has launched a forecasting pilot for renewable energy operators.",
+        "region": "",
+        "categories": [],
+        "funding": {
+          "round": "",
+          "amount": "",
+          "currency": "",
+          "investors": []
+        },
+        "raw_payload": ""
+      },
+      "fallback_policy": {
+        "on_failure": "mark this source degraded and continue other sources",
+        "retry": "next scheduled cadence with bounded backoff",
+        "html_scraping": false,
+        "serve_stale_as_new": false
+      },
+      "fixture": "testdata/source_catalog/uk-research-and-innovation.xml"
+    },
+    {
+      "id": "british-business-bank",
+      "display_name": "British Business Bank",
+      "status": "approved",
+      "publisher_page_url": "https://www.gov.uk/government/organisations/british-business-bank",
+      "publisher_access_url": "https://www.gov.uk/government/organisations/british-business-bank",
+      "feed_url": "https://www.gov.uk/government/organisations/british-business-bank.atom",
+      "terms_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/",
+      "reuse_policy": "GOV.UK public-sector information is reusable under the Open Government Licence v3.0, including commercial and adapted use, subject to attribution and exclusions.",
+      "reuse_requirements": [
+        "Show British Business Bank as the publisher and link the original GOV.UK entry.",
+        "Link the Open Government Licence v3.0 where practical and indicate that the digest is a normalized summary.",
+        "Do not reuse excluded logos, personal data, third-party works, or imply official endorsement."
+      ],
+      "access_method": "atom",
+      "credentials": [],
+      "access_evidence": {
+        "publisher_advertised_feed": true,
+        "reuse_verified": true,
+        "probed_at": "2026-07-10",
+        "http_status": 200,
+        "content_type": "application/atom+xml"
+      },
+      "request_policy": {
+        "cadence_minutes": 60,
+        "timeout_seconds": 10,
+        "max_response_bytes": 1048576,
+        "max_items": 100,
+        "rate_limit": "at most one request per 60 minutes",
+        "redirect_policy": "maximum 3 redirects; final URL must remain HTTPS on www.gov.uk",
+        "user_agent_required": true
+      },
+      "expected_freshness_hours": 720,
+      "accepted_item_policy": "Accept only one named early-stage or growth company with a concrete raise, investment, guarantee, launch, acquisition, or portfolio milestone in the headline. Skip market reports, scheme statistics, policy, appointments, generic advice, aggregate portfolios, and announcements without one company subject.",
+      "field_mapping": {
+        "startup_name": {
+          "source": "entry.title",
+          "rule": "Extract the company before an approved concrete-event verb; reject fund, scheme, lender, report, and portfolio names unless the subject is one operating company.",
+          "on_missing": "skip"
+        },
+        "canonical_url": {
+          "source": "none",
+          "rule": "The Atom entry has no structured company homepage; leave empty.",
+          "on_missing": "empty"
+        },
+        "source_url": {
+          "source": "entry.link[rel=alternate].href",
+          "rule": "Require an absolute HTTPS www.gov.uk URL and retain it exactly for OGL attribution.",
+          "on_missing": "skip"
+        },
+        "signal_type": {
+          "source": "entry.title",
+          "rule": "raises/secures/receives with explicit capital maps to funding; launches maps to launch; an explicit acquisition maps to acquisition; other admitted concrete company events map to news.",
+          "on_missing": "news"
+        },
+        "published_at": {
+          "source": "entry.updated",
+          "rule": "Parse RFC 3339 with timezone and convert to UTC; never substitute fetch time.",
+          "on_missing": "skip"
+        },
+        "description": {
+          "source": "entry.summary",
+          "rule": "Strip markup, decode entities, collapse whitespace, and keep at most 280 Unicode characters of the feed-provided summary.",
+          "on_missing": "empty"
+        },
+        "region": {
+          "source": "none",
+          "rule": "Publisher mandate does not prove company region.",
+          "on_missing": "empty"
+        },
+        "categories": {
+          "source": "none",
+          "rule": "The feed has no stable product taxonomy; leave empty until a reviewed allowlist exists.",
+          "on_missing": "empty"
+        },
+        "funding": {
+          "source": "entry.title",
+          "rule": "Populate amount, currency, and round only when explicitly present in the headline; investors remain empty.",
+          "on_missing": "empty"
+        },
+        "raw_payload": {
+          "source": "none",
+          "rule": "The adapter leaves RawPayload empty; NormalizeSignal derives bounded categories/funding JSON from the typed record and stores no raw feed body.",
+          "on_missing": "empty"
+        }
+      },
+      "fixture_expected": {
+        "startup_name": "OrbitPay",
+        "canonical_url": "",
+        "source_url": "https://www.gov.uk/government/news/orbitpay-seed-round",
+        "signal_type": "funding",
+        "published_at": "2026-07-09T10:00:00Z",
+        "description": "OrbitPay provides payment infrastructure for small online merchants.",
+        "region": "",
+        "categories": [],
+        "funding": {
+          "round": "seed",
+          "amount": "8 million",
+          "currency": "GBP",
+          "investors": []
+        },
+        "raw_payload": ""
+      },
+      "fallback_policy": {
+        "on_failure": "mark this source degraded and continue other sources",
+        "retry": "next scheduled cadence with bounded backoff",
+        "html_scraping": false,
+        "serve_stale_as_new": false
+      },
+      "fixture": "testdata/source_catalog/british-business-bank.xml"
+    }
+  ]
+}

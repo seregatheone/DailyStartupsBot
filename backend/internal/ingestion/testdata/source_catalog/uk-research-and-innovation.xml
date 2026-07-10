@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>UK Research and Innovation</title>
+  <id>https://www.gov.uk/government/organisations/uk-research-and-innovation</id>
+  <updated>2026-07-09T09:00:00Z</updated>
+  <entry>
+    <title>HelioGrid launches grid forecasting pilot</title>
+    <id>https://www.gov.uk/government/news/heliogrid-launches-grid-forecasting-pilot#2026-07-09T09:00:00Z</id>
+    <updated>2026-07-09T09:00:00Z</updated>
+    <link rel="alternate" href="https://www.gov.uk/government/news/heliogrid-launches-grid-forecasting-pilot" />
+    <summary>HelioGrid has launched a forecasting pilot for renewable energy operators.</summary>
+  </entry>
+</feed>

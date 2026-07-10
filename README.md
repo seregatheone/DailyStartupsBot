@@ -54,6 +54,10 @@ Telegram E2E runner:
 
 Не коммитьте реальные токены, API keys, локальные базы и сгенерированное runtime state.
 
+## Источники данных
+
+Утверждённые public feeds, field mapping, request limits, attribution и degradation policy зафиксированы в [`docs/source-catalog.md`](docs/source-catalog.md) и [`source_catalog.json`](backend/internal/ingestion/source_catalog.json). Они пока не включены в `DefaultRegistry`: до завершения generic RSS/Atom adapter и runtime wiring (#42/#43) live default остаётся `sample-public`.
+
 ## Быстрый старт
 
 Запустите backend:

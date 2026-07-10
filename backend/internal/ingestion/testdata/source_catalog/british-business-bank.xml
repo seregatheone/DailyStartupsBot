@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>British Business Bank</title>
+  <id>https://www.gov.uk/government/organisations/british-business-bank</id>
+  <updated>2026-07-09T10:00:00Z</updated>
+  <entry>
+    <title>OrbitPay raises £8 million seed round</title>
+    <id>https://www.gov.uk/government/news/orbitpay-seed-round#2026-07-09T10:00:00Z</id>
+    <updated>2026-07-09T10:00:00Z</updated>
+    <link rel="alternate" href="https://www.gov.uk/government/news/orbitpay-seed-round" />
+    <summary>OrbitPay provides payment infrastructure for small online merchants.</summary>
+  </entry>
+</feed>
