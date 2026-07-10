@@ -1,21 +1,21 @@
 # DailyStartupsBot
 
-DailyStartupsBot is an MVP with two services:
+DailyStartupsBot — Telegram-бот с кратким ежедневным дайджестом стартапов. Проект состоит из двух сервисов:
 
-- `backend/`: Go service that will own configuration, storage, ingestion, digest generation, delivery queue, and health.
-- `bot/`: Python Telegram-facing service that will own long polling, commands, Telegram sends, and delivery attempt reporting.
+- `backend/` — Go-сервис для конфигурации, SQLite, сбора сигналов, генерации дайджеста, очереди доставки и health state;
+- `bot/` — Python-сервис для Telegram long polling, команд, отправки сообщений и отчётов о попытках доставки.
 
-## Prerequisites
+## Требования
 
 - Go 1.22+
 - Python 3.11+
 - `make`
 
-## Local Configuration
+## Конфигурация
 
-The example `.env` files document supported variables. The services read process environment variables and do not load `.env` files automatically; export the required values in your shell or service manager.
+Примеры `.env` перечисляют поддерживаемые переменные. Сервисы читают переменные процесса и не загружают `.env` автоматически: экспортируйте значения в shell или service manager.
 
-Supported backend settings:
+Backend:
 
 - `DAILY_STARTUPS_BACKEND_ENV`
 - `DAILY_STARTUPS_BACKEND_ADDR`
@@ -27,7 +27,7 @@ Supported backend settings:
 - `DAILY_STARTUPS_INTERNAL_API_SECRET`
 - `DAILY_STARTUPS_SOURCES_JSON`
 
-Supported bot settings:
+Bot:
 
 - `DAILY_STARTUPS_BOT_ENV`
 - `DAILY_STARTUPS_TELEGRAM_TOKEN`
@@ -35,24 +35,68 @@ Supported bot settings:
 - `DAILY_STARTUPS_POLL_TIMEOUT_SECONDS`
 - `DAILY_STARTUPS_DRY_RUN`
 
-Do not commit real tokens, API keys, local databases, or generated runtime state.
+Не коммитьте реальные токены, API keys, локальные базы и сгенерированное runtime state.
 
-## Run Locally
+## Быстрый старт
+
+Запустите backend:
 
 ```bash
 make run-backend
 curl --fail http://127.0.0.1:8080/health
 ```
 
-`make run-backend` starts the local HTTP API. Use `make dry-run-backend` to run the sample public source once, render a digest, print JSON structured logs, and exit without Telegram send calls.
+В новом приватном чате с ботом отправьте `/start`. Ожидаемый короткий ответ:
 
-The internal HTTP API is not authenticated yet. Keep `DAILY_STARTUPS_BACKEND_ADDR` bound to loopback (`127.0.0.1`) until authentication is implemented.
+> DailyStartupsBot присылает краткий ежедневный дайджест стартапов. Отправьте /subscribe, чтобы подписаться.
 
-For a live Telegram test chat:
+Далее:
 
-1. Create a private test bot with BotFather.
-2. Start `make run-backend` in the first terminal and verify `/health`.
-3. Start the bot in the second terminal:
+1. `/subscribe` — включить ежедневную доставку.
+2. `/status` — проверить подписку и текущие настройки.
+3. `/help` — открыть список команд и пример настройки.
+4. `/preview` — посмотреть доступный предварительный дайджест.
+5. `/unsubscribe` — отключить доставку.
+
+Подробные параметры не перечисляются в `/start`; они доступны через `/help` и `/preferences`.
+
+## Настройка дайджеста
+
+Команда принимает один или несколько параметров в формате `ключ=значение`:
+
+```text
+/preferences regions=EU,US categories=AI,SaaS time=09:00 timezone=Europe/Moscow max=7
+```
+
+- `regions` — регионы через запятую;
+- `categories` — категории через запятую;
+- `time` — время доставки в формате `ЧЧ:ММ`;
+- `timezone` — IANA timezone, например `Europe/Moscow`;
+- `max` — количество стартапов от 1 до 10.
+
+Примеры:
+
+```text
+/preferences max=10
+/preferences regions=EU categories=AI
+/preferences time=08:30 timezone=Europe/Moscow
+```
+
+После изменения отправьте `/status`, чтобы проверить сохранённые значения.
+
+## Live-прогон Telegram
+
+Используйте отдельного приватного тестового бота.
+
+1. Создайте бота через BotFather и не публикуйте token.
+2. В первом терминале запустите backend и проверьте health:
+
+   ```bash
+   make run-backend
+   curl --fail-with-body http://127.0.0.1:8080/health
+   ```
+
+3. Во втором терминале запустите bot:
 
    ```bash
    DAILY_STARTUPS_TELEGRAM_TOKEN='replace-with-test-token' \
@@ -61,36 +105,81 @@ For a live Telegram test chat:
    make run-bot
    ```
 
-4. In the test chat, verify `/start`, `/help`, `/subscribe`, `/status`, `/preferences`, `/preview`, and `/unsubscribe`.
+4. В тестовом чате последовательно проверьте `/start`, `/help`, `/subscribe`, `/status`, `/preferences max=10`, `/preview` и `/unsubscribe`.
+5. Убедитесь, что bot polling и backend продолжают работать после неверной команды и временной ошибки запроса.
 
-Only run live mode with a private test bot token.
+Backend API пока нельзя выставлять наружу: оставляйте `DAILY_STARTUPS_BACKEND_ADDR` на loopback (`127.0.0.1`).
 
-## Operations
+## Telegram metadata
 
-Backend logs are JSON events for startup, ingestion cycles, digest generation, delivery queue dry-run decisions, health summary, failures, skipped sources, and rendered dry-run output.
+Русские имя, описания и меню команд хранятся в `bot/daily_startups_bot/telegram_metadata.ru.json`.
 
-Bot logs are JSON events for startup, polling, command handling, sends, and delivery attempt results.
+Проверка без token и без внешних изменений:
 
-Command replies use an at-most-once policy. If Telegram rejects a reply or the send transport fails, the bot records safe structured metadata, drops that reply without automatic retry, continues later updates in the batch, and advances the polling offset. This avoids duplicate replies and poison-update replay; logs do not include reply text, bot tokens, or raw Telegram error descriptions.
+```bash
+make check-localization
+```
 
-The backend health summary contains source health, last ingestion time, active subscriber count, last delivery activity when available, and bounded recent failure summaries. It reports `status: "degraded"` when a source is unhealthy or a delivery is retrying, permanently failed, or blocked. Raw stored errors, Telegram messages, credentials, and response bodies are not returned.
+Явное применение к тестовому боту:
+
+```bash
+DAILY_STARTUPS_TELEGRAM_TOKEN='replace-with-test-token' make apply-telegram-metadata
+```
+
+Команда последовательно вызывает `setMyName`, `setMyShortDescription`, `setMyDescription` и `setMyCommands` для default scope и языка `ru`. Поэтому русский профиль видят и русскоязычные клиенты, и пользователи без отдельной локали. Повторное применение безопасно. После выполнения откройте профиль и меню тестового бота и сравните их с JSON. Token не печатается и не сохраняется.
+
+Правила терминов и технический allowlist описаны в [`docs/localization.md`](docs/localization.md).
+
+## Диагностика
+
+### Бот не отвечает
+
+1. Проверьте, что запущены оба процесса: `make run-backend` и `make run-bot`.
+2. Выполните `curl --fail-with-body http://127.0.0.1:8080/health`.
+3. Проверьте `DAILY_STARTUPS_BACKEND_BASE_URL` и что live bot запущен с `DAILY_STARTUPS_DRY_RUN=false`.
+4. Убедитесь, что token относится к нужному тестовому боту. Не вставляйте token в issue или лог.
+5. Посмотрите JSON events `telegram_poll_failure`, `telegram_command_failure` и startup events; они не содержат message text и token.
+
+### `/status` отвечает, что сервис временно недоступен
+
+Команда не смогла получить ответ backend. Проверьте `/health`, адрес backend, состояние SQLite и последние backend logs. После восстановления повторите `/status`; переподписка обычно не требуется.
+
+### `/preferences` отклоняет значение
+
+Проверьте формат `ключ=значение`, IANA timezone и диапазон `max=1..10`. Пример:
+
+```text
+/preferences regions=EU categories=AI time=09:00 timezone=Europe/Moscow max=10
+```
+
+### Metadata не применяется
+
+Сначала выполните `make check-localization`. Затем проверьте наличие `DAILY_STARTUPS_TELEGRAM_TOKEN` и права token на выбранного бота. Ошибка Bot API указывает неуспешный method; token в вывод не включается.
+
+## Операции
+
+Backend пишет JSON events для startup, ingestion cycles, digest generation, delivery queue, health, failures, skipped sources и dry-run output. Bot пишет JSON events для startup, polling, command handling, sends и delivery attempts.
+
+Ответы на команды используют at-most-once policy. Если Telegram отклоняет reply или transport падает, bot записывает безопасную metadata, не повторяет reply автоматически, продолжает обработку batch и продвигает polling offset. Это защищает от duplicate replies и poison-update replay; reply text, bot tokens и raw Telegram descriptions в logs не попадают.
+
+Health snapshot содержит source health, последнее ingestion time, число активных subscribers, последнюю delivery activity и ограниченный список generic failures. `status: "degraded"` означает нездоровый source либо delivery в состоянии `retry`, `failed` или `blocked`. Raw errors, Telegram messages, credentials и response bodies не возвращаются.
 
 ### Internal delivery API
 
-These routes are for the local bot worker and operators. The API is currently unauthenticated: keep it on loopback, do not expose it through a public listener or reverse proxy, and do not put tokens or other secrets in request fields. The examples below use a deliberately fake delivery id.
+Routes предназначены для локального bot worker и оператора. API пока не аутентифицирован: держите его на loopback, не выставляйте через публичный listener/reverse proxy и не передавайте secrets в request fields.
 
-Inspect health and fetch deliveries that are eligible now:
+Получить health и готовые deliveries:
 
 ```bash
 curl --fail-with-body http://127.0.0.1:8080/health
 curl --fail-with-body http://127.0.0.1:8080/v1/deliveries/due
 ```
 
-`GET /health` returns `status`, `source_health`, optional `last_ingestion_at`, `subscriber_count`, optional `last_delivery_run`, and `recent_failures`; list fields are empty arrays rather than `null` when there is no data.
+`GET /health` возвращает `status`, `source_health`, optional `last_ingestion_at`, `subscriber_count`, optional `last_delivery_run` и `recent_failures`. List fields возвращаются как пустые arrays, а не `null`.
 
-`GET /v1/deliveries/due` returns `{"deliveries":[]}` when nothing is due. Each due delivery contains `id`, `telegram_id`, `digest_date`, rendered `messages`, and the current `attempt` count. A transiently failed delivery is omitted until its retry time; sent, permanently failed, and blocked deliveries are never returned again.
+`GET /v1/deliveries/due` возвращает `{"deliveries":[]}`, если отправлять нечего. Delivery содержит `id`, `telegram_id`, `digest_date`, rendered `messages` и `attempt`. Запись со статусом `retry` появится после `next_attempt_at`; `sent`, `failed` и `blocked` повторно не выдаются.
 
-After every Telegram send attempt, report one of `success`, `failed`, or `blocked`:
+После Telegram send attempt передайте `success`, `failed` или `blocked`:
 
 ```bash
 curl --fail-with-body \
@@ -105,14 +194,15 @@ curl --fail-with-body \
   http://127.0.0.1:8080/v1/deliveries/example-delivery-001/attempts
 ```
 
-The response identifies the delivery and attempt, returns the resulting queue `status` (`sent`, `retry`, `failed`, or `blocked`) and attempt count, and sets `duplicate: true` for an exact repeat. A retry response also includes `next_attempt_at`. The attempt row and queue transition are committed atomically; `blocked` also deactivates the subscriber in that transaction.
+Response возвращает итоговый queue `status` (`sent`, `retry`, `failed` или `blocked`) и attempt count; для точного повтора устанавливается `duplicate: true`. При потерянном HTTP response повторяйте исходный payload целиком, включая `attempted_at` и optional error fields.
 
-Exact repeats are idempotent and return success without incrementing the count again. A distinct attempt after a terminal transition is rejected with HTTP `409`; an unknown delivery returns `404`, and invalid ids, timestamps, statuses, or JSON return `400`. Reuse the exact original payload, including `attempted_at` and optional error fields, when retrying an attempt report after a lost HTTP response.
-
-## Test
+## Тесты
 
 ```bash
 make test
 make test-backend
 make test-bot
+make check-localization
 ```
+
+`make check-localization` проверяет реальные bot-owned command responses, технический allowlist и Telegram metadata. Machine-readable API fields, slash-команды, log keys, region/category codes и timezone IDs намеренно не переводятся.

@@ -51,6 +51,46 @@ class TelegramHTTPClient:
             payload["parse_mode"] = parse_mode
         return self._api("sendMessage", payload)
 
+    def set_my_name(
+        self, name: str, language_code: str | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, object] = {"name": name}
+        if language_code is not None:
+            payload["language_code"] = language_code
+        return self._api("setMyName", payload)
+
+    def set_my_short_description(
+        self, short_description: str, language_code: str | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, object] = {"short_description": short_description}
+        if language_code is not None:
+            payload["language_code"] = language_code
+        return self._api(
+            "setMyShortDescription",
+            payload,
+        )
+
+    def set_my_description(
+        self, description: str, language_code: str | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, object] = {"description": description}
+        if language_code is not None:
+            payload["language_code"] = language_code
+        return self._api("setMyDescription", payload)
+
+    def set_my_commands(
+        self, commands: list[dict[str, str]], language_code: str | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, object] = {
+            "commands": json.dumps(commands, ensure_ascii=False),
+        }
+        if language_code is not None:
+            payload["language_code"] = language_code
+        return self._api(
+            "setMyCommands",
+            payload,
+        )
+
     def _api(self, method: str, payload: dict[str, object]) -> dict[str, Any]:
         data = urlencode(payload).encode("utf-8")
         request = Request(

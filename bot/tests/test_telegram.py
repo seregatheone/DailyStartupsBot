@@ -126,6 +126,30 @@ class TelegramHTTPClientTest(unittest.TestCase):
 
         self.assertTrue(raised.exception.blocked)
 
+    def test_serializes_russian_command_metadata_for_bot_api(self) -> None:
+        commands = [{"command": "start", "description": "Начать работу"}]
+
+        with patch.object(
+            TelegramHTTPClient, "_api", return_value={"ok": True}
+        ) as mocked_api:
+            self.client.set_my_commands(commands, "ru")
+
+        mocked_api.assert_called_once_with(
+            "setMyCommands",
+            {
+                "commands": json.dumps(commands, ensure_ascii=False),
+                "language_code": "ru",
+            },
+        )
+
+    def test_omits_language_code_for_default_metadata_scope(self) -> None:
+        with patch.object(
+            TelegramHTTPClient, "_api", return_value={"ok": True}
+        ) as mocked_api:
+            self.client.set_my_name("Стартапы дня")
+
+        mocked_api.assert_called_once_with("setMyName", {"name": "Стартапы дня"})
+
 
 if __name__ == "__main__":
     unittest.main()
