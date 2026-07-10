@@ -49,8 +49,11 @@ class CommandRouter:
         username = str(user.get("username", ""))
 
         command = _log_command_name(text)
+        parse_mode: str | None = None
         try:
             response = self.handle_command(text, telegram_id, username)
+            if command == "/preview":
+                parse_mode = "HTML"
         except BackendError as exc:
             log_event(
                 "telegram_command_failure",
@@ -61,7 +64,7 @@ class CommandRouter:
             response = BACKEND_UNAVAILABLE_TEXT
         reply_status = "sent"
         try:
-            self.telegram.send_message(chat_id, response)
+            self.telegram.send_message(chat_id, response, parse_mode=parse_mode)
         except TelegramAPIError as exc:
             reply_status = "dropped"
             log_event(
