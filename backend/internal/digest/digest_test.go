@@ -149,6 +149,24 @@ func TestPreviewAndDeliveryUseTheSameRenderer(t *testing.T) {
 	}
 }
 
+func TestRenderEscapesLegacyDigestDateAndTimezone(t *testing.T) {
+	generator := Generator{}
+	digest := Digest{
+		Date:     "legacy <date>",
+		Timezone: "UTC & Local",
+		Items:    []Item{{StartupName: "Acme AI"}},
+	}
+
+	text := generator.RenderMessages(digest)[0].Text
+
+	if !strings.Contains(text, "<i>legacy &lt;date&gt; · UTC &amp; Local</i>") {
+		t.Fatalf("legacy metadata is not safely rendered: %s", text)
+	}
+	if strings.Contains(text, "legacy <date>") || strings.Contains(text, "UTC & Local") {
+		t.Fatalf("legacy metadata was not escaped: %s", text)
+	}
+}
+
 func TestRenderAppliesItemLimitAndSplitsMessages(t *testing.T) {
 	generator := Generator{MessageLimit: 120}
 	request := Request{
