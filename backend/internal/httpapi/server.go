@@ -17,7 +17,6 @@ import (
 	v1 "github.com/seregatheone/DailyStartupsBot/backend/internal/contracts/v1"
 	deliverydomain "github.com/seregatheone/DailyStartupsBot/backend/internal/delivery"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/digest"
-	"github.com/seregatheone/DailyStartupsBot/backend/internal/ingestion"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
 
@@ -34,6 +33,7 @@ type subscriberStore interface {
 	GetPreferences(context.Context, int64) (storage.Preferences, error)
 	GetDigestRun(context.Context, string) (storage.DigestRun, []storage.DigestItem, error)
 	GetDelivery(context.Context, string) (storage.Delivery, error)
+	ListStartupSignals(context.Context, time.Time, time.Time) ([]storage.StartupSignal, error)
 	ListDueDeliveries(context.Context, time.Time) ([]storage.Delivery, error)
 	RecordDeliveryAttempt(context.Context, storage.DeliveryAttempt, storage.DeliveryTransition) (storage.Delivery, bool, error)
 	GetHealthSnapshot(context.Context, int) (storage.HealthSnapshot, error)
@@ -261,13 +261,22 @@ func (server *Server) preview(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 
-	result, err := ingestion.NewService(ingestion.DefaultRegistry(), nil).Run(request.Context(), server.config.Sources)
+	localDate, err := time.ParseInLocation("2006-01-02", digestDate, location)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "Дата должна быть в формате YYYY-MM-DD")
+		return
+	}
+	signals, err := server.store.ListStartupSignals(
+		request.Context(),
+		localDate.UTC(),
+		localDate.AddDate(0, 0, 1).UTC(),
+	)
 	if err != nil {
 		writeInternalError(writer, err)
 		return
 	}
 	response := (digest.Generator{}).PreviewResponse(digest.Request{
-		Signals:     result.Signals,
+		Signals:     signals,
 		Preferences: preferences,
 		DigestDate:  digestDate,
 		Timezone:    timezone,

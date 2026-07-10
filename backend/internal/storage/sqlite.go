@@ -82,13 +82,30 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 		{table: "delivery_queue", name: "next_attempt_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "delivery_queue", name: "confirmed_through", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "delivery_attempts", name: "sequence", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "digest_items", name: "source_attributions_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{table: "source_health", name: "last_attempt_at", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, column := range columns {
 		if err := repo.ensureColumn(ctx, column.table, column.name, column.definition); err != nil {
 			return err
 		}
 	}
+	if err := repo.backfillSourceAttemptTimes(ctx); err != nil {
+		return err
+	}
 	return repo.normalizePreferenceItemLimits(ctx)
+}
+
+func (repo *SQLiteRepository) backfillSourceAttemptTimes(ctx context.Context) error {
+	_, err := repo.db.ExecContext(ctx, `
+UPDATE source_health
+SET last_attempt_at = last_ingestion_at
+WHERE last_attempt_at = '' AND status IN ('ok', 'failed', 'fetching')
+`)
+	if err != nil {
+		return fmt.Errorf("backfill source attempt times: %w", err)
+	}
+	return nil
 }
 
 func (repo *SQLiteRepository) normalizePreferenceItemLimits(ctx context.Context) error {
@@ -301,28 +318,33 @@ WHERE telegram_id = ?
 
 func (repo *SQLiteRepository) SaveSourceHealth(ctx context.Context, health SourceHealth) error {
 	_, err := repo.db.ExecContext(ctx, `
-INSERT INTO source_health (source_id, status, last_ingestion_at, last_error)
-VALUES (?, ?, ?, ?)
+INSERT INTO source_health (source_id, status, last_ingestion_at, last_attempt_at, last_error)
+VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(source_id) DO UPDATE SET
 	status = excluded.status,
 	last_ingestion_at = excluded.last_ingestion_at,
+	last_attempt_at = CASE
+		WHEN excluded.last_attempt_at = '' THEN source_health.last_attempt_at
+		ELSE excluded.last_attempt_at
+	END,
 	last_error = excluded.last_error
-`, health.SourceID, health.Status, formatTime(health.LastIngestionAt), health.LastError)
+`, health.SourceID, health.Status, formatTime(health.LastIngestionAt), formatTime(health.LastAttemptAt), health.LastError)
 	return err
 }
 
 func (repo *SQLiteRepository) GetSourceHealth(ctx context.Context, sourceID string) (SourceHealth, error) {
 	var health SourceHealth
-	var lastIngestionAt string
+	var lastIngestionAt, lastAttemptAt string
 	err := repo.db.QueryRowContext(ctx, `
-SELECT source_id, status, last_ingestion_at, last_error
+SELECT source_id, status, last_ingestion_at, last_attempt_at, last_error
 FROM source_health
 WHERE source_id = ?
-`, sourceID).Scan(&health.SourceID, &health.Status, &lastIngestionAt, &health.LastError)
+`, sourceID).Scan(&health.SourceID, &health.Status, &lastIngestionAt, &lastAttemptAt, &health.LastError)
 	if err != nil {
 		return SourceHealth{}, err
 	}
 	health.LastIngestionAt = parseStoredTime(lastIngestionAt)
+	health.LastAttemptAt = parseStoredTime(lastAttemptAt)
 	return health, nil
 }
 
@@ -422,16 +444,21 @@ func (repo *SQLiteRepository) SaveDigestItem(ctx context.Context, item DigestIte
 	if err != nil {
 		return err
 	}
+	sourceAttributions, err := marshalSourceAttributions(item.SourceAttributions)
+	if err != nil {
+		return err
+	}
 	_, err = repo.db.ExecContext(ctx, `
-INSERT INTO digest_items (id, digest_id, startup_name, summary, rank, source_urls_json)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO digest_items (id, digest_id, startup_name, summary, rank, source_urls_json, source_attributions_json)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	digest_id = excluded.digest_id,
 	startup_name = excluded.startup_name,
 	summary = excluded.summary,
 	rank = excluded.rank,
-	source_urls_json = excluded.source_urls_json
-`, item.ID, item.DigestID, item.StartupName, item.Summary, item.Rank, sourceURLs)
+	source_urls_json = excluded.source_urls_json,
+	source_attributions_json = excluded.source_attributions_json
+`, item.ID, item.DigestID, item.StartupName, item.Summary, item.Rank, sourceURLs, sourceAttributions)
 	return err
 }
 
@@ -473,10 +500,14 @@ ON CONFLICT(id) DO UPDATE SET
 		if err != nil {
 			return err
 		}
+		sourceAttributions, err := marshalSourceAttributions(item.SourceAttributions)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO digest_items (id, digest_id, startup_name, summary, rank, source_urls_json)
-VALUES (?, ?, ?, ?, ?, ?)
-`, item.ID, item.DigestID, item.StartupName, item.Summary, item.Rank, sourceURLs); err != nil {
+INSERT INTO digest_items (id, digest_id, startup_name, summary, rank, source_urls_json, source_attributions_json)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+`, item.ID, item.DigestID, item.StartupName, item.Summary, item.Rank, sourceURLs, sourceAttributions); err != nil {
 			return err
 		}
 	}
@@ -496,7 +527,7 @@ WHERE id = ?
 	run.CreatedAt = parseStoredTime(createdAt)
 
 	rows, err := repo.db.QueryContext(ctx, `
-SELECT id, digest_id, startup_name, summary, rank, source_urls_json
+	SELECT id, digest_id, startup_name, summary, rank, source_urls_json, source_attributions_json
 FROM digest_items
 WHERE digest_id = ?
 ORDER BY rank ASC
@@ -510,10 +541,12 @@ ORDER BY rank ASC
 	for rows.Next() {
 		var item DigestItem
 		var sourceURLs string
-		if err := rows.Scan(&item.ID, &item.DigestID, &item.StartupName, &item.Summary, &item.Rank, &sourceURLs); err != nil {
+		var sourceAttributions string
+		if err := rows.Scan(&item.ID, &item.DigestID, &item.StartupName, &item.Summary, &item.Rank, &sourceURLs, &sourceAttributions); err != nil {
 			return DigestRun{}, nil, err
 		}
 		item.SourceURLs = unmarshalStrings(sourceURLs)
+		item.SourceAttributions = unmarshalSourceAttributions(sourceAttributions)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -891,7 +924,7 @@ WHERE active = 1
 
 	if err := repo.db.QueryRowContext(ctx, `
 SELECT EXISTS (
-	SELECT 1 FROM source_health WHERE status != 'ok'
+	SELECT 1 FROM source_health WHERE status NOT IN ('ok', 'skipped')
 	UNION ALL
 	SELECT 1 FROM delivery_queue WHERE status IN ('retry', 'failed', 'blocked')
 )
@@ -905,7 +938,7 @@ SELECT EXISTS (
 		'source:' || source_id AS component,
 		'source is unhealthy' AS message
 	FROM source_health
-	WHERE status != 'ok'
+	WHERE status NOT IN ('ok', 'skipped')
 `)
 	if err != nil {
 		return HealthSnapshot{}, err
@@ -1015,6 +1048,28 @@ func unmarshalStrings(raw string) []string {
 	var values []string
 	if err := json.Unmarshal([]byte(raw), &values); err != nil {
 		return []string{}
+	}
+	return values
+}
+
+func marshalSourceAttributions(values []SourceAttribution) (string, error) {
+	if values == nil {
+		values = []SourceAttribution{}
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalSourceAttributions(raw string) []SourceAttribution {
+	var values []SourceAttribution
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil
+	}
+	if len(values) == 0 {
+		return nil
 	}
 	return values
 }

@@ -19,7 +19,12 @@ type DryRunResult struct {
 }
 
 func RunDryRun(ctx context.Context, cfg config.Config, now time.Time) (DryRunResult, error) {
-	ingestionService := ingestion.NewService(ingestion.DefaultRegistry(), nil)
+	registry, sources, err := ingestion.AssembleRuntime(true, cfg.Sources)
+	if err != nil {
+		return DryRunResult{}, err
+	}
+	cfg.Sources = sources
+	ingestionService := ingestion.NewService(registry, nil)
 	ingestionResult, err := ingestionService.Run(ctx, cfg.Sources)
 	if err != nil {
 		return DryRunResult{}, err

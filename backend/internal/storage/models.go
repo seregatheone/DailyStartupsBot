@@ -39,6 +39,7 @@ type SourceHealth struct {
 	SourceID        string
 	Status          string
 	LastIngestionAt time.Time
+	LastAttemptAt   time.Time
 	LastError       string
 }
 
@@ -62,13 +63,19 @@ type DigestRun struct {
 	CreatedAt  time.Time
 }
 
+type SourceAttribution struct {
+	SourceID  string `json:"source_id"`
+	SourceURL string `json:"source_url"`
+}
+
 type DigestItem struct {
-	ID          string
-	DigestID    string
-	StartupName string
-	Summary     string
-	Rank        int
-	SourceURLs  []string
+	ID                 string
+	DigestID           string
+	StartupName        string
+	Summary            string
+	Rank               int
+	SourceURLs         []string
+	SourceAttributions []SourceAttribution
 }
 
 type Delivery struct {

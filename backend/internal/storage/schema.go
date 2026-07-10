@@ -21,6 +21,7 @@ var migrationStatements = []string{
 		source_id TEXT PRIMARY KEY,
 		status TEXT NOT NULL,
 		last_ingestion_at TEXT NOT NULL,
+		last_attempt_at TEXT NOT NULL DEFAULT '',
 		last_error TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE TABLE IF NOT EXISTS startup_signals (
@@ -48,6 +49,7 @@ var migrationStatements = []string{
 		summary TEXT NOT NULL,
 		rank INTEGER NOT NULL,
 		source_urls_json TEXT NOT NULL,
+		source_attributions_json TEXT NOT NULL DEFAULT '[]',
 		FOREIGN KEY (digest_id) REFERENCES digest_runs(id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS delivery_queue (

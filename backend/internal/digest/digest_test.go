@@ -308,6 +308,61 @@ func TestStoredDeliveryMessagesTruncatesSingleOversizedItem(t *testing.T) {
 	}
 }
 
+func TestRenderApprovedSourcesUsesPublisherAndOGLAttribution(t *testing.T) {
+	tests := []struct {
+		id        string
+		publisher string
+	}{
+		{id: "innovate-uk", publisher: "Innovate UK"},
+		{id: "uk-research-and-innovation", publisher: "UK Research and Innovation"},
+		{id: "british-business-bank", publisher: "British Business Bank"},
+	}
+	items := make([]Item, 0, len(tests))
+	for index, test := range tests {
+		items = append(items, Item{
+			StartupName: test.publisher,
+			Sources: []SourceAttribution{{
+				SourceID:  test.id,
+				SourceURL: fmt.Sprintf("https://www.gov.uk/government/news/company-%d", index+1),
+			}},
+		})
+	}
+
+	text := (Generator{}).RenderMessages(Digest{Date: "2026-07-10", Timezone: "UTC", Items: items})[0].Text
+	for index, test := range tests {
+		want := fmt.Sprintf(
+			`<a href="https://www.gov.uk/government/news/company-%d">%s</a>`,
+			index+1,
+			test.publisher,
+		)
+		if !strings.Contains(text, want) {
+			t.Fatalf("publisher attribution is missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Count(text, `>OGL v3.0</a> · нормализованное резюме`) != len(tests) ||
+		!strings.Contains(text, `href="https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"`) {
+		t.Fatalf("OGL attribution is incomplete:\n%s", text)
+	}
+}
+
+func TestStoredDeliveryMessagesPreservesApprovedAttribution(t *testing.T) {
+	messages := (Generator{}).StoredDeliveryMessages(
+		storage.DigestRun{DigestDate: "2026-07-10", Timezone: "UTC"},
+		[]storage.DigestItem{{
+			StartupName: "Acme", Summary: "Launch", Rank: 1,
+			SourceURLs: []string{"https://www.gov.uk/government/news/acme"},
+			SourceAttributions: []storage.SourceAttribution{{
+				SourceID: "innovate-uk", SourceURL: "https://www.gov.uk/government/news/acme",
+			}},
+		}},
+	)
+	text := messages[0].Text
+	if !strings.Contains(text, `<a href="https://www.gov.uk/government/news/acme">Innovate UK</a>`) ||
+		!strings.Contains(text, `>OGL v3.0</a> · нормализованное резюме`) {
+		t.Fatalf("stored attribution was not preserved:\n%s", text)
+	}
+}
+
 func signal(id, name, canonicalURL, sourceID, sourceURL, signalType string) storage.StartupSignal {
 	return storage.StartupSignal{
 		ID:           id,

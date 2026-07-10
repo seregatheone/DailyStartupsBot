@@ -2,8 +2,10 @@ package ingestion
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/config"
@@ -13,6 +15,7 @@ import (
 const (
 	StatusOK           = "ok"
 	StatusFailed       = "failed"
+	StatusFetching     = "fetching"
 	StatusSkipped      = "skipped"
 	StatusConfigError  = "config_error"
 	sourceFetchFailure = "source fetch failed"
@@ -23,10 +26,20 @@ type SignalStore interface {
 	SaveSourceHealth(context.Context, storage.SourceHealth) error
 }
 
+type sourceHealthReader interface {
+	GetSourceHealth(context.Context, string) (storage.SourceHealth, error)
+}
+
 type Service struct {
 	registry Registry
 	store    SignalStore
 	now      func() time.Time
+	attempts *sourceAttemptGuard
+}
+
+type sourceAttemptGuard struct {
+	mu   sync.Mutex
+	last map[string]time.Time
 }
 
 type SourceResult struct {
@@ -49,6 +62,7 @@ func NewService(registry Registry, store SignalStore) Service {
 		registry: registry,
 		store:    store,
 		now:      func() time.Time { return time.Now().UTC() },
+		attempts: &sourceAttemptGuard{last: make(map[string]time.Time)},
 	}
 }
 
@@ -61,7 +75,7 @@ func (service Service) Run(ctx context.Context, configs []config.SourceConfig) (
 	var persistenceErrors []error
 
 	for _, skippedSource := range skipped {
-		if service.store != nil && skippedSource.Status != StatusSkipped {
+		if service.store != nil {
 			if err := service.store.SaveSourceHealth(ctx, storage.SourceHealth{
 				SourceID:        skippedSource.SourceID,
 				Status:          skippedSource.Status,
@@ -82,6 +96,24 @@ func (service Service) Run(ctx context.Context, configs []config.SourceConfig) (
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
+		cadenceSkipped, cadenceErr := service.reserveSourceAttempt(ctx, source)
+		if cadenceErr != nil {
+			result.Sources = append(result.Sources, SourceResult{
+				SourceID: source.Config.ID,
+				Status:   StatusFailed,
+				Message:  "source cadence state unavailable",
+			})
+			persistenceErrors = append(persistenceErrors, cadenceErr)
+			continue
+		}
+		if cadenceSkipped {
+			result.Sources = append(result.Sources, SourceResult{
+				SourceID: source.Config.ID,
+				Status:   StatusSkipped,
+				Message:  "source cadence is not due",
+			})
+			continue
+		}
 		sourceResult, err := service.fetchSource(ctx, source, &result)
 		result.Sources = append(result.Sources, sourceResult)
 		if ctx.Err() != nil {
@@ -93,6 +125,48 @@ func (service Service) Run(ctx context.Context, configs []config.SourceConfig) (
 	}
 
 	return result, errors.Join(persistenceErrors...)
+}
+
+func (service Service) reserveSourceAttempt(
+	ctx context.Context,
+	source RegisteredSource,
+) (bool, error) {
+	cadence, err := time.ParseDuration(source.Config.FetchCadence)
+	if err != nil || cadence <= 0 {
+		return false, nil
+	}
+	if service.attempts == nil {
+		service.attempts = &sourceAttemptGuard{last: make(map[string]time.Time)}
+	}
+	service.attempts.mu.Lock()
+	defer service.attempts.mu.Unlock()
+
+	now := service.now()
+	lastAttempt := service.attempts.last[source.Config.ID]
+	if reader, ok := service.store.(sourceHealthReader); ok {
+		health, readErr := reader.GetSourceHealth(ctx, source.Config.ID)
+		if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
+			return false, fmt.Errorf("read cadence state for source %s: %w", source.Config.ID, readErr)
+		}
+		if readErr == nil && health.LastAttemptAt.After(lastAttempt) {
+			lastAttempt = health.LastAttemptAt
+		}
+	}
+	if !lastAttempt.IsZero() && now.Before(lastAttempt.Add(cadence)) {
+		return true, nil
+	}
+	if service.store != nil {
+		if err := service.store.SaveSourceHealth(ctx, storage.SourceHealth{
+			SourceID:        source.Config.ID,
+			Status:          StatusFetching,
+			LastIngestionAt: now,
+			LastAttemptAt:   now,
+		}); err != nil {
+			return false, fmt.Errorf("reserve cadence for source %s: %w", source.Config.ID, err)
+		}
+	}
+	service.attempts.last[source.Config.ID] = now
+	return false, nil
 }
 
 func (service Service) fetchSource(

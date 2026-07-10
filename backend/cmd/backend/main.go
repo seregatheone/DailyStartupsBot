@@ -15,6 +15,7 @@ import (
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/app"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/config"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/httpapi"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/ingestion"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
 
@@ -25,6 +26,12 @@ func main() {
 		logger.Error("configuration_error", "error", err.Error())
 		os.Exit(1)
 	}
+	registry, sources, err := ingestion.AssembleRuntime(cfg.DryRun, cfg.Sources)
+	if err != nil {
+		logger.Error("configuration_error", "error", err.Error())
+		os.Exit(1)
+	}
+	cfg.Sources = sources
 
 	logger.Info("backend_startup", "config", cfg.Redacted())
 	fmt.Fprintln(os.Stdout, app.StartupMessage(cfg))
@@ -46,13 +53,27 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := runLiveBackend(ctx, cfg, logger); err != nil {
+	if err := runLiveBackendWithRegistry(ctx, cfg, logger, registry); err != nil {
 		logger.Error("backend_runtime_failure", "error", err.Error())
 		os.Exit(1)
 	}
 }
 
 func runLiveBackend(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+	registry, sources, err := ingestion.AssembleRuntime(false, cfg.Sources)
+	if err != nil {
+		return fmt.Errorf("build live source registry: %w", err)
+	}
+	cfg.Sources = sources
+	return runLiveBackendWithRegistry(ctx, cfg, logger, registry)
+}
+
+func runLiveBackendWithRegistry(
+	ctx context.Context,
+	cfg config.Config,
+	logger *slog.Logger,
+	registry ingestion.Registry,
+) error {
 	repository, err := storage.OpenSQLite(ctx, cfg.DatabasePath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -69,7 +90,7 @@ func runLiveBackend(ctx context.Context, cfg config.Config, logger *slog.Logger)
 	}
 	workerContext, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
-	pipeline := app.NewScheduledPipeline(cfg, repository, logger)
+	pipeline := app.NewScheduledPipelineWithRegistry(cfg, repository, logger, registry)
 	pipelineDone := make(chan struct{})
 	go func() {
 		defer close(pipelineDone)

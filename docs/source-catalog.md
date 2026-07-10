@@ -1,6 +1,6 @@
 # Каталог публичных startup-источников
 
-Проверено 10 июля 2026 года. Этот документ и [`source_catalog.json`](../backend/internal/ingestion/source_catalog.json) фиксируют разрешённую поверхность чтения, условия повторного использования, mapping и fail-closed правила до реализации сетевых adapters.
+Проверено 10 июля 2026 года. Этот документ и [`source_catalog.json`](../backend/internal/ingestion/source_catalog.json) фиксируют разрешённую поверхность чтения, условия повторного использования, runtime mapping и fail-closed правила сетевых adapters.
 
 ## Утверждённые источники
 
@@ -15,6 +15,26 @@
 Контент GOV.UK разрешён к копированию, публикации, адаптации и коммерческому использованию по [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/) при сохранении атрибуции. Логотипы, персональные данные, сторонние произведения и использование с намёком на официальное одобрение исключены. Поэтому каталог разрешает только title-derived metadata и короткий Atom summary, но не изображения и не полный article body.
 
 Каждый request использует узнаваемый User-Agent, timeout 10 секунд, предел 1 MiB, максимум 100 entries и не чаще одного раза в час. Разрешены максимум три redirect; final URL обязан остаться HTTPS на `www.gov.uk`. Article HTML, search pages, email subscriptions, login и иные endpoints не используются как fallback.
+
+## Runtime enablement и отключение
+
+Безопасный default — dry-run: `config.Default()` регистрирует только локальный `sample-public` и не выполняет live HTTP fetch. Сеть включается только явным opt-in:
+
+```bash
+DAILY_STARTUPS_DRY_RUN=false make run-backend
+```
+
+В live mode embedded catalog создаёт registry и три активных source configuration. `sample-public` в live mode запрещён. `DAILY_STARTUPS_SOURCES_JSON` не задаёт URL, display name, cadence, limits или tags: это строгий activation overlay. Например, следующая конфигурация отключает Innovate UK, оставляя два неуказанных источника активными:
+
+```bash
+DAILY_STARTUPS_DRY_RUN=false \
+DAILY_STARTUPS_SOURCES_JSON='[{"id":"innovate-uk","active":false,"access_method":"atom"}]' \
+make run-backend
+```
+
+Duplicate/unknown IDs, credentials и несовпадение approved access method завершают startup до открытия SQLite и HTTP listener. Catalog metadata всегда перезаписывает одноимённые поля overlay, поэтому конфигурацией нельзя подменить publisher, cadence или rate limit.
+
+Scheduler — единственный runtime consumer, который запускает ingestion fetch. Перед HTTP request он атомарно сохраняет отдельный `last_attempt_at`; этот timestamp переживает restart и переход health в `skipped`, поэтому crash-loop или быстрое disable/re-enable не обходят 60-минутный cadence. Если reservation нельзя записать, network request не выполняется. `/v1/digests/preview` выбирает сохранённые signals за локальные календарные сутки запрошенного timezone и никогда не инициирует сетевой запрос. Отключённый source записывает health status `skipped`, заменяя прежний failure; `skipped` не переводит общий `/health` в `degraded`.
 
 ## Общий контракт `SourceRecord`
 
@@ -59,11 +79,11 @@
 - [`uk-research-and-innovation.xml`](../backend/internal/ingestion/testdata/source_catalog/uk-research-and-innovation.xml)
 - [`british-business-bank.xml`](../backend/internal/ingestion/testdata/source_catalog/british-business-bank.xml)
 
-Offline contract test преобразует каждую fixture в настоящий `SourceRecord` и сравнивает все поля с `fixture_expected`, включая empty collections и `RawPayload`. Это не заменяет runtime adapter из #42, а фиксирует его проверяемый handoff contract.
+Offline contract test пропускает каждую fixture через настоящий runtime adapter и сравнивает все поля `SourceRecord` с `fixture_expected`, включая empty collections и `RawPayload`.
 
 ## Attribution, хранение и удаление
 
-Каждый отображаемый signal обязан назвать publishing organisation, дать прямую ссылку `source_url` и сделать доступной ссылку на OGL v3.0 с указанием, что текст нормализован. Feed summary не выдаётся за собственный оригинальный материал; логотипы, images и article body не зеркалируются.
+Каждый отображаемый signal называет publishing organisation, даёт прямую ссылку `source_url` и ссылку на OGL v3.0 с пометкой «нормализованное резюме». Структурные `source_id`/`source_url` сохраняются в immutable digest snapshot, поэтому retry и delivery после перезапуска не теряют attribution. Feed summary не выдаётся за собственный оригинальный материал; логотипы, images и article body не зеркалируются.
 
 Source немедленно отключается для новых fetch и public display, если publisher убрал Atom discovery, изменил reuse terms, потребовал auth, запретил такой доступ или attribution больше нельзя сохранить. Исторические `source_id`/`source_url` могут оставаться только во внутреннем audit; прежние публичные digests не считаются разрешённым fallback cache.
 
@@ -76,4 +96,6 @@ Source немедленно отключается для новых fetch и pu
 - Неожиданный Atom root/namespace, пропажа `entry.title`, alternate link или `entry.updated`, смена final host/media type либо массовое падение admission — breaking change.
 - Breaking format принимается только после совместного обновления fixture, catalog mapping, reuse review и tests. До этого adapter fail-closed.
 
-Проверка каталога входит в обычный `go test ./...` и не обращается к сети. Live access/reuse probe остаётся отдельной operator/review процедурой.
+Проверка каталога входит в обычный `go test ./...` и не обращается к сети. Live access/reuse probe остаётся отдельной operator/review процедурой: не более одного request на source в 60 минут, без автоматического retry и без запуска в CI. Probe фиксирует HTTP/media type и adapter accounting; отсутствие принятого startup item не является transport failure и не смягчает admission rules.
+
+Последний ручной production-adapter probe выполнен 10 июля 2026 года в 05:20 UTC, по одному request на endpoint: Innovate UK — `20 fetched / 20 skipped`, UKRI — `20 / 20`, British Business Bank — `19 / 19`. Все три transport/parser results имели status `ok`; текущие entries не прошли строгий single-company event gate, поэтому `normalized=0` и синтетические startup signals не создавались.

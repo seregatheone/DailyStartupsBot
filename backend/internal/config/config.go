@@ -100,10 +100,15 @@ func LoadFromEnv(environ []string) (Config, error) {
 		cfg.DryRun = parsed
 	}
 
+	sourcesExplicit := false
 	if raw, ok := values["DAILY_STARTUPS_SOURCES_JSON"]; ok && strings.TrimSpace(raw) != "" {
 		if err := json.Unmarshal([]byte(raw), &cfg.Sources); err != nil {
 			return Config{}, fmt.Errorf("DAILY_STARTUPS_SOURCES_JSON must be valid JSON: %w", err)
 		}
+		sourcesExplicit = true
+	}
+	if !cfg.DryRun && !sourcesExplicit {
+		cfg.Sources = nil
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -132,6 +137,9 @@ func (cfg Config) Validate() error {
 		}
 		if strings.TrimSpace(source.AccessMethod) == "" {
 			return fmt.Errorf("source %q access method is required", source.ID)
+		}
+		if !cfg.DryRun && source.Active && source.ID == "sample-public" {
+			return fmt.Errorf("source %q is allowed only in dry-run mode", source.ID)
 		}
 	}
 	return nil

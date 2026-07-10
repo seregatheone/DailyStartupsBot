@@ -28,7 +28,10 @@ func TestSubscriptionPreferencesAndPreviewWorkflow(t *testing.T) {
 	}
 	defer repository.Close()
 
-	testServer := httptest.NewServer(NewServer(config.Default(), repository))
+	fixedNow := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	server := NewServer(config.Default(), repository)
+	server.now = func() time.Time { return fixedNow }
+	testServer := httptest.NewServer(server)
 	defer testServer.Close()
 
 	response := requestJSON(t, http.MethodGet, testServer.URL+"/health", nil)
@@ -88,6 +91,14 @@ func TestSubscriptionPreferencesAndPreviewWorkflow(t *testing.T) {
 	if status.Preferences.MaxItems != 7 || status.Preferences.DeliveryTime != "09:30" {
 		t.Fatalf("resubscribe reset preferences: %#v", status.Preferences)
 	}
+	if err := repository.SaveStartupSignal(context.Background(), storage.StartupSignal{
+		ID: "persisted-preview", StartupName: "Acme AI", SourceID: "sample-public",
+		SourceURL: "https://sample.example/acme-ai", SignalType: "launch",
+		PublishedAt: fixedNow.Add(-time.Hour), Description: "Persisted preview signal", Region: "EU",
+		RawPayload: `{"categories":["AI"]}`,
+	}); err != nil {
+		t.Fatalf("seed preview signal: %v", err)
+	}
 
 	response = requestJSON(t, http.MethodPost, testServer.URL+"/v1/digests/preview", map[string]any{
 		"telegram_id": 42,
@@ -104,6 +115,47 @@ func TestSubscriptionPreferencesAndPreviewWorkflow(t *testing.T) {
 	decodeResponse(t, response, &subscribed)
 	if subscribed.Subscriber.Active {
 		t.Fatalf("subscriber should be inactive: %#v", subscribed.Subscriber)
+	}
+}
+
+func TestPreviewReadsPersistedSignalsInLiveModeWithoutIngestion(t *testing.T) {
+	repository, err := storage.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "preview-live.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+	fixedNow := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	if _, err := repository.SaveSubscription(context.Background(), storage.Subscriber{
+		TelegramID: 77, Active: true, CreatedAt: fixedNow,
+	}, storage.Preferences{
+		TelegramID: 77, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 10,
+	}); err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+	if err := repository.SaveStartupSignal(context.Background(), storage.StartupSignal{
+		ID: "persisted-live-preview", StartupName: "Persisted Co", SourceID: "innovate-uk",
+		SourceURL: "https://www.gov.uk/government/news/persisted-co", SignalType: "launch",
+		PublishedAt: fixedNow.Add(-time.Hour), Description: "Already ingested",
+	}); err != nil {
+		t.Fatalf("seed persisted signal: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.DryRun = false
+	cfg.Sources = []config.SourceConfig{{ID: "innovate-uk", Active: true, AccessMethod: "atom"}}
+	server := NewServer(cfg, repository)
+	server.now = func() time.Time { return fixedNow }
+	testServer := httptest.NewServer(server)
+	defer testServer.Close()
+
+	response := requestJSON(t, http.MethodPost, testServer.URL+"/v1/digests/preview", map[string]any{
+		"telegram_id": 77,
+		"date":        "2026-07-10",
+	})
+	var preview v1.PreviewResponse
+	decodeResponse(t, response, &preview)
+	if preview.Empty || len(preview.Messages) != 1 || !strings.Contains(preview.Messages[0].Text, "Persisted Co") {
+		t.Fatalf("preview did not use persisted signal: %#v", preview)
 	}
 }
 

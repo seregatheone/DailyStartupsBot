@@ -5,17 +5,32 @@ TBD - created by archiving change add-daily-startup-telegram-bot. Update Purpose
 ## Requirements
 ### Requirement: Configurable startup sources
 
-The system SHALL load startup source definitions from configuration and only enable sources marked as active.
+The service SHALL load source definitions from runtime configuration and SHALL resolve every active definition to an adapter registered by the selected dry-run/live mode.
 
-#### Scenario: Enabled source is loaded
+#### Scenario: Dry-run defaults are loaded
 
-- **WHEN** the application starts with an active source definition
-- **THEN** the ingestion service registers that source with its id, display name, access method, fetch cadence, tags, and rate limit settings
+- **WHEN** dry-run starts without explicit source JSON
+- **THEN** only local `sample-public` is active and no network feed adapter is invoked
 
-#### Scenario: Disabled source is skipped
+#### Scenario: Live defaults are loaded
 
-- **WHEN** the application starts with a disabled source definition
-- **THEN** the ingestion service MUST NOT fetch data from that source
+- **WHEN** `DAILY_STARTUPS_DRY_RUN=false` is explicitly configured without source JSON
+- **THEN** the three approved public sources are active and `sample-public` is absent
+
+#### Scenario: Sample is configured live
+
+- **WHEN** active `sample-public` is supplied while dry-run is false
+- **THEN** configuration validation fails before backend startup
+
+#### Scenario: Explicit live source overlay is invalid
+
+- **WHEN** source JSON contains a duplicate/unknown ID, credentials or access method mismatch
+- **THEN** startup fails before storage or listener creation and cannot perform duplicate or spoofed requests
+
+#### Scenario: Explicit live source metadata is supplied
+
+- **WHEN** a supported source overlay provides display, cadence, tags or rate metadata
+- **THEN** catalog-owned values replace it while only the active flag is operator-controlled
 
 ### Requirement: Source credentials are optional and explicit
 
@@ -224,3 +239,21 @@ Every source adapter SHALL return a result where `Skipped` is non-negative and e
 
 - **WHEN** the service accepts an adapter result
 - **THEN** `Fetched` equals `len(Records) + Skipped` and the counters cannot represent a negative or silently lost item
+
+### Requirement: Persisted preview source
+
+The live preview endpoint SHALL build its digest from stored signals for the requested local calendar date and SHALL NOT invoke source adapters.
+
+#### Scenario: User requests preview
+
+- **WHEN** a subscribed user requests a preview for a valid date/timezone
+- **THEN** stored signals in that date window are filtered/rendered and zero outbound source requests occur
+
+### Requirement: Licensed source attribution
+
+Approved source attribution SHALL retain publisher display name, exact source URL and an accessible OGL v3 normalized-summary notice in both generated and stored delivery messages.
+
+#### Scenario: Approved signal is rendered
+
+- **WHEN** its digest item is generated or restored from an immutable snapshot
+- **THEN** the publisher name links to the original GOV.UK entry and the OGL v3 normalized-summary notice is present

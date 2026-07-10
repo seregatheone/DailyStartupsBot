@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/config"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/digest"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/ingestion"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
@@ -256,6 +257,54 @@ func TestLocalDayWindowUsesCalendarDayAcrossDST(t *testing.T) {
 	}
 }
 
+func TestScheduledDigestSnapshotPreservesStructuredSourceAttribution(t *testing.T) {
+	run, items := scheduledDigestSnapshot(42, time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC), digest.Digest{
+		Date: "2026-07-10", Timezone: "UTC",
+		Items: []digest.Item{{
+			StartupName: "Acme", Description: "Launch",
+			Sources: []digest.SourceAttribution{{
+				SourceID: "innovate-uk", SourceURL: "https://www.gov.uk/government/news/acme",
+			}},
+		}},
+	})
+	if run.ID == "" || len(items) != 1 || len(items[0].SourceAttributions) != 1 ||
+		items[0].SourceAttributions[0].SourceID != "innovate-uk" ||
+		items[0].SourceAttributions[0].SourceURL != "https://www.gov.uk/government/news/acme" {
+		t.Fatalf("structured attribution was not snapshotted: run=%#v items=%#v", run, items)
+	}
+}
+
+func TestScheduledPipelinePreservesSourceCadenceAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	repository, err := storage.OpenSQLite(ctx, filepath.Join(t.TempDir(), "source-cadence.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+	attempts := 0
+	registry := ingestion.NewRegistry(schedulerAdapter{id: "source", attempts: &attempts})
+	cfg := config.Default()
+	cfg.DryRun = false
+	cfg.Timezone = "UTC"
+	cfg.IngestionTime = "00:00"
+	cfg.Sources = []config.SourceConfig{{
+		ID: "source", Active: true, AccessMethod: "api", FetchCadence: "60m",
+	}}
+
+	first := NewScheduledPipelineWithRegistry(cfg, repository, testLogger(), registry)
+	firstResult, err := first.RunOnce(ctx, time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC))
+	if err != nil || attempts != 1 || len(firstResult.Sources) != 1 || firstResult.Sources[0].Status != ingestion.StatusOK {
+		t.Fatalf("first source attempt failed: attempts=%d result=%#v err=%v", attempts, firstResult, err)
+	}
+
+	restarted := NewScheduledPipelineWithRegistry(cfg, repository, testLogger(), registry)
+	restartResult, err := restarted.RunOnce(ctx, time.Date(2026, 7, 10, 8, 10, 0, 0, time.UTC))
+	if err != nil || attempts != 1 || len(restartResult.Sources) != 1 || restartResult.Sources[0].Status != ingestion.StatusSkipped {
+		t.Fatalf("restart repeated source inside cadence: attempts=%d result=%#v err=%v", attempts, restartResult, err)
+	}
+
+}
+
 func seedSubscription(
 	t *testing.T,
 	repository *storage.SQLiteRepository,
@@ -275,9 +324,10 @@ func seedSubscription(
 }
 
 type schedulerAdapter struct {
-	id      string
-	records []ingestion.SourceRecord
-	err     error
+	id       string
+	records  []ingestion.SourceRecord
+	err      error
+	attempts *int
 }
 
 type failOnceSignalRepository struct {
@@ -304,6 +354,9 @@ func (adapter schedulerAdapter) Fetch(
 	context.Context,
 	config.SourceConfig,
 ) (ingestion.AdapterFetchResult, error) {
+	if adapter.attempts != nil {
+		*adapter.attempts++
+	}
 	return ingestion.AdapterFetchResult{
 		Records: append([]ingestion.SourceRecord(nil), adapter.records...),
 	}, adapter.err

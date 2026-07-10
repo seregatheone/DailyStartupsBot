@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -162,6 +163,106 @@ func TestServiceAccountsForAdapterLevelSkippedItems(t *testing.T) {
 	}
 }
 
+func TestServiceEnforcesPersistedSourceCadenceAcrossInstances(t *testing.T) {
+	for _, previousStatus := range []string{StatusOK, StatusFailed} {
+		t.Run(previousStatus, func(t *testing.T) {
+			now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+			attempts := 0
+			adapter := fakeAdapter{
+				id: "source", accessMethod: "atom",
+				fetch: func(context.Context) (AdapterFetchResult, error) {
+					attempts++
+					return AdapterFetchResult{}, nil
+				},
+			}
+			store := &memoryStore{health: map[string]storage.SourceHealth{
+				"source": {
+					SourceID: "source", Status: previousStatus,
+					LastIngestionAt: now.Add(-10 * time.Minute),
+					LastAttemptAt:   now.Add(-10 * time.Minute), LastError: "preserved",
+				},
+			}}
+			service := NewService(NewRegistry(adapter), store)
+			service.now = func() time.Time { return now }
+			cfg := []config.SourceConfig{{
+				ID: "source", Active: true, AccessMethod: "atom", FetchCadence: "60m",
+			}}
+
+			result, err := service.Run(context.Background(), cfg)
+			if err != nil || attempts != 0 || len(result.Sources) != 1 || result.Sources[0].Status != StatusSkipped {
+				t.Fatalf("recent persisted attempt was repeated: attempts=%d result=%#v err=%v", attempts, result, err)
+			}
+			if health := store.health["source"]; health.Status != previousStatus ||
+				!health.LastIngestionAt.Equal(now.Add(-10*time.Minute)) || health.LastError != "preserved" {
+				t.Fatalf("cadence skip overwrote persisted attempt: %#v", health)
+			}
+
+			service = NewService(NewRegistry(adapter), store)
+			service.now = func() time.Time { return now.Add(51 * time.Minute) }
+			result, err = service.Run(context.Background(), cfg)
+			if err != nil || attempts != 1 || result.Sources[0].Status != StatusOK {
+				t.Fatalf("source did not resume after cadence: attempts=%d result=%#v err=%v", attempts, result, err)
+			}
+		})
+	}
+}
+
+func TestServiceDoesNotFetchWhenCadenceReservationCannotPersist(t *testing.T) {
+	attempts := 0
+	store := &memoryStore{healthErr: errors.New("database unavailable")}
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "atom",
+		fetch: func(context.Context) (AdapterFetchResult, error) {
+			attempts++
+			return AdapterFetchResult{}, nil
+		},
+	}), store)
+	service.now = func() time.Time { return time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC) }
+
+	result, err := service.Run(context.Background(), []config.SourceConfig{{
+		ID: "source", Active: true, AccessMethod: "atom", FetchCadence: "60m",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "reserve cadence") || attempts != 0 ||
+		len(result.Sources) != 1 || result.Sources[0].Status != StatusFailed {
+		t.Fatalf("reservation failure allowed fetch: attempts=%d result=%#v err=%v", attempts, result, err)
+	}
+}
+
+func TestServiceDoesNotRepeatFetchWhenCompletionHealthCannotPersist(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	attempts := 0
+	store := &memoryStore{
+		healthErr:       errors.New("database unavailable"),
+		healthFailAfter: 1,
+	}
+	adapter := fakeAdapter{
+		id: "source", accessMethod: "atom",
+		fetch: func(context.Context) (AdapterFetchResult, error) {
+			attempts++
+			return AdapterFetchResult{}, nil
+		},
+	}
+	cfg := []config.SourceConfig{{
+		ID: "source", Active: true, AccessMethod: "atom", FetchCadence: "60m",
+	}}
+	service := NewService(NewRegistry(adapter), store)
+	service.now = func() time.Time { return now }
+	first, err := service.Run(context.Background(), cfg)
+	if err == nil || attempts != 1 || len(first.Sources) != 1 || first.Sources[0].Status != StatusOK {
+		t.Fatalf("expected completion-health failure after one fetch: attempts=%d result=%#v err=%v", attempts, first, err)
+	}
+	if health := store.health["source"]; health.Status != StatusFetching || !health.LastAttemptAt.Equal(now) {
+		t.Fatalf("attempt reservation did not survive completion failure: %#v", health)
+	}
+
+	service = NewService(NewRegistry(adapter), store)
+	service.now = func() time.Time { return now.Add(time.Minute) }
+	second, err := service.Run(context.Background(), cfg)
+	if err != nil || attempts != 1 || len(second.Sources) != 1 || second.Sources[0].Status != StatusSkipped {
+		t.Fatalf("completion failure caused repeated fetch: attempts=%d result=%#v err=%v", attempts, second, err)
+	}
+}
+
 func TestServiceRejectsInvalidAdapterAccounting(t *testing.T) {
 	store := &memoryStore{}
 	service := NewService(NewRegistry(fakeAdapter{
@@ -298,9 +399,12 @@ func (adapter fakeAdapter) Fetch(ctx context.Context, _ config.SourceConfig) (Ad
 }
 
 type memoryStore struct {
-	signals   []storage.StartupSignal
-	health    map[string]storage.SourceHealth
-	signalErr error
+	signals         []storage.StartupSignal
+	health          map[string]storage.SourceHealth
+	signalErr       error
+	healthErr       error
+	healthFailAfter int
+	healthWrites    int
 }
 
 func (store *memoryStore) SaveStartupSignal(_ context.Context, signal storage.StartupSignal) error {
@@ -312,9 +416,23 @@ func (store *memoryStore) SaveStartupSignal(_ context.Context, signal storage.St
 }
 
 func (store *memoryStore) SaveSourceHealth(_ context.Context, health storage.SourceHealth) error {
+	store.healthWrites++
+	if store.healthErr != nil && (store.healthFailAfter == 0 || store.healthWrites > store.healthFailAfter) {
+		return store.healthErr
+	}
 	if store.health == nil {
 		store.health = map[string]storage.SourceHealth{}
 	}
+	if health.LastAttemptAt.IsZero() {
+		health.LastAttemptAt = store.health[health.SourceID].LastAttemptAt
+	}
 	store.health[health.SourceID] = health
 	return nil
+}
+
+func (store *memoryStore) GetSourceHealth(_ context.Context, sourceID string) (storage.SourceHealth, error) {
+	if health, ok := store.health[sourceID]; ok {
+		return health, nil
+	}
+	return storage.SourceHealth{}, sql.ErrNoRows
 }
