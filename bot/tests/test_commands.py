@@ -41,7 +41,7 @@ class FakeBackend:
 
 class FakeTelegram:
     def __init__(self) -> None:
-        self.sent: list[tuple[int, str]] = []
+        self.sent: list[tuple[int, str, str | None]] = []
 
     def get_updates(self, offset: int | None, timeout_seconds: int) -> list[dict[str, Any]]:
         return []
@@ -49,7 +49,7 @@ class FakeTelegram:
     def send_message(
         self, chat_id: int, text: str, parse_mode: str | None = None
     ) -> dict[str, Any]:
-        self.sent.append((chat_id, text))
+        self.sent.append((chat_id, text, parse_mode))
         return {"ok": True}
 
 
@@ -64,6 +64,11 @@ class EmptyBackend(FakeBackend):
 
     def preview(self, telegram_id: int) -> dict[str, Any]:
         return {"messages": [], "empty": True}
+
+
+class FailingPreviewBackend(FakeBackend):
+    def preview(self, telegram_id: int) -> dict[str, Any]:
+        raise BackendError("backend is unavailable")
 
 
 def update(text: str) -> dict[str, Any]:
@@ -114,7 +119,17 @@ class CommandsTest(unittest.TestCase):
 
         self.assertIn("Подписка: активна", self.telegram.sent[0][1])
         self.assertIn("Максимум элементов: 10", self.telegram.sent[0][1])
+        self.assertIsNone(self.telegram.sent[0][2])
         self.assertIn("Acme AI", self.telegram.sent[1][1])
+        self.assertEqual(self.telegram.sent[1][2], "HTML")
+
+    def test_preview_backend_failure_remains_plain_text(self) -> None:
+        router = CommandRouter(FailingPreviewBackend(), self.telegram)
+
+        router.handle_update(update("/preview"))
+
+        self.assertIn("временно недоступен", self.telegram.sent[0][1])
+        self.assertIsNone(self.telegram.sent[0][2])
 
     def test_preferences_delegate_valid_payload(self) -> None:
         self.router.handle_update(
