@@ -5,6 +5,7 @@ from threading import Event, Thread, current_thread
 from typing import Callable, Protocol
 
 from daily_startups_bot.backend import BackendError
+from daily_startups_bot.checkpoint import OffsetCheckpointError
 from daily_startups_bot.events import log_event
 from daily_startups_bot.telegram import TelegramAPIError, TelegramTransportError
 
@@ -135,6 +136,8 @@ class ApplicationCoordinator:
 
 
 def _failure_kind(exc: Exception) -> str:
+    if isinstance(exc, OffsetCheckpointError):
+        return "checkpoint"
     if isinstance(exc, BackendError):
         return "backend"
     if isinstance(exc, TelegramAPIError):

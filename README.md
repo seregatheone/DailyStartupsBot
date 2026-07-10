@@ -33,6 +33,7 @@ Bot:
 - `DAILY_STARTUPS_TELEGRAM_TOKEN`
 - `DAILY_STARTUPS_BACKEND_BASE_URL`
 - `DAILY_STARTUPS_POLL_TIMEOUT_SECONDS`
+- `DAILY_STARTUPS_POLL_OFFSET_PATH` (default: `./data/telegram-offset.json`)
 - `DAILY_STARTUPS_DELIVERY_POLL_INTERVAL_SECONDS` (default: `30`)
 - `DAILY_STARTUPS_WORKER_RETRY_BACKOFF_SECONDS` (default: `5`)
 - `DAILY_STARTUPS_DRY_RUN`
@@ -105,6 +106,7 @@ curl --fail http://127.0.0.1:8080/health
    ```bash
    DAILY_STARTUPS_TELEGRAM_TOKEN='replace-with-test-token' \
    DAILY_STARTUPS_BACKEND_BASE_URL='http://127.0.0.1:8080' \
+   DAILY_STARTUPS_POLL_OFFSET_PATH='./data/telegram-offset.json' \
    DAILY_STARTUPS_DRY_RUN=false \
    make run-bot
    ```
@@ -169,6 +171,10 @@ Backend пишет JSON events для startup, ingestion cycles, digest generati
 При shutdown общий stop signal прерывает cadence/backoff waits, после чего процесс дожидается завершения обоих workers. Уже выполняющийся Telegram long poll завершается в пределах запрошенного timeout плюс пятисекундный HTTP margin. Lifecycle и failure events не включают Telegram token, chat id, message contents или raw error text.
 
 Ответы на команды используют at-most-once policy. Если Telegram отклоняет reply или transport падает, bot записывает безопасную metadata, не повторяет reply автоматически, продолжает обработку batch и продвигает polling offset. Это защищает от duplicate replies и poison-update replay; reply text, bot tokens и raw Telegram descriptions в logs не попадают.
+
+Polling offset хранится в private atomic checkpoint по пути `DAILY_STARTUPS_POLL_OFFSET_PATH`. При первом запуске отсутствие файла нормально: первый `getUpdates` уходит с offset `None`. После restart bot загружает сохранённый `next_offset` до первого network poll, поэтому полностью завершённый prefix не переигрывается. Файл содержит только version и следующий offset; startup metadata показывает для пути только `[CONFIGURED]`.
+
+Checkpoint сохраняется после каждого обработанного, проигнорированного или сознательно dropped update. Если запись временно не удалась, продвинутый offset остаётся pending в памяти: command worker применяет backoff и повторяет запись до следующего `getUpdates`, а delivery worker продолжает работу. Corrupt, unsupported или unreadable checkpoint останавливает command polling до Telegram request; исправьте либо осознанно удалите state file и перезапустите bot. Crash между Telegram side effect и durable checkpoint может повторить только текущий неподтверждённый update, включая duplicate reply; exactly-once reply Telegram API не гарантируется.
 
 Health snapshot содержит source health, последнее ingestion time, число активных subscribers, последнюю delivery activity и ограниченный список generic failures. `status: "degraded"` означает нездоровый source либо delivery в состоянии `retry`, `failed` или `blocked`. Raw errors, Telegram messages, credentials и response bodies не возвращаются.
 

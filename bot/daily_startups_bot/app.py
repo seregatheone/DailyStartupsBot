@@ -1,7 +1,9 @@
 import signal
+from pathlib import Path
 
 from daily_startups_bot.application import ApplicationCoordinator
 from daily_startups_bot.backend import BackendClient
+from daily_startups_bot.checkpoint import FileOffsetCheckpoint
 from daily_startups_bot.commands import CommandRouter
 from daily_startups_bot.config import BotConfig, load_config, redacted_config
 from daily_startups_bot.delivery_worker import DeliveryWorker
@@ -23,6 +25,7 @@ def build_poller(config: BotConfig) -> Poller:
         telegram=telegram,
         router=router,
         timeout_seconds=config.polling_timeout_seconds,
+        checkpoint=FileOffsetCheckpoint(Path(config.polling_offset_path)),
     )
 
 
@@ -34,6 +37,7 @@ def build_application(config: BotConfig) -> ApplicationCoordinator:
         telegram=telegram,
         router=router,
         timeout_seconds=config.polling_timeout_seconds,
+        checkpoint=FileOffsetCheckpoint(Path(config.polling_offset_path)),
     )
     delivery_worker = DeliveryWorker(backend=backend, telegram=telegram)
     return ApplicationCoordinator(

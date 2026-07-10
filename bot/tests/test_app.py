@@ -1,9 +1,15 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
 from daily_startups_bot import app
-from daily_startups_bot.app import build_application, run_live_application, startup_message
+from daily_startups_bot.app import (
+    build_application,
+    build_poller,
+    run_live_application,
+    startup_message,
+)
 from daily_startups_bot.config import BotConfig
 
 
@@ -15,15 +21,39 @@ class StartupMessageTest(unittest.TestCase):
 
         self.assertIn(config.service_name, message)
 
+    @patch("daily_startups_bot.app.FileOffsetCheckpoint")
     @patch("daily_startups_bot.app.TelegramHTTPClient")
     @patch("daily_startups_bot.app.BackendClient")
-    def test_build_application_shares_clients_between_workers(
-        self, backend_type: Mock, telegram_type: Mock
+    def test_build_poller_injects_configured_checkpoint(
+        self, backend_type: Mock, telegram_type: Mock, checkpoint_type: Mock
     ) -> None:
         config = SimpleNamespace(
             backend_base_url="http://backend.test",
             telegram_token="test-token",
             polling_timeout_seconds=12,
+            polling_offset_path="/private/runtime/telegram-offset.json",
+        )
+
+        poller = build_poller(config)  # type: ignore[arg-type]
+
+        checkpoint_type.assert_called_once_with(
+            Path("/private/runtime/telegram-offset.json")
+        )
+        self.assertIs(poller.checkpoint, checkpoint_type.return_value)
+        self.assertIs(poller.telegram, telegram_type.return_value)
+        self.assertIs(poller.router.backend, backend_type.return_value)
+
+    @patch("daily_startups_bot.app.FileOffsetCheckpoint")
+    @patch("daily_startups_bot.app.TelegramHTTPClient")
+    @patch("daily_startups_bot.app.BackendClient")
+    def test_build_application_shares_clients_between_workers(
+        self, backend_type: Mock, telegram_type: Mock, checkpoint_type: Mock
+    ) -> None:
+        config = SimpleNamespace(
+            backend_base_url="http://backend.test",
+            telegram_token="test-token",
+            polling_timeout_seconds=12,
+            polling_offset_path="/private/runtime/telegram-offset.json",
             delivery_poll_interval_seconds=17,
             worker_retry_backoff_seconds=3,
         )
@@ -32,6 +62,10 @@ class StartupMessageTest(unittest.TestCase):
 
         backend = backend_type.return_value
         telegram = telegram_type.return_value
+        checkpoint_type.assert_called_once_with(
+            Path("/private/runtime/telegram-offset.json")
+        )
+        self.assertIs(application.poller.checkpoint, checkpoint_type.return_value)
         self.assertIs(application.poller.telegram, telegram)
         self.assertIs(application.poller.router.backend, backend)
         self.assertIs(application.poller.router.telegram, telegram)

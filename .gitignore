@@ -17,6 +17,7 @@ build/
 *.local.db
 *.db
 backend/data/
+bot/data/
 logs/
 
 # Node
