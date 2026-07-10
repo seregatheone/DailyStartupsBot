@@ -39,6 +39,37 @@ class TelegramHTTPClientTest(unittest.TestCase):
         self.client = TelegramHTTPClient("test-secret-token")
 
     @patch("daily_startups_bot.telegram.urlopen")
+    def test_long_poll_http_timeout_has_bounded_margin(
+        self, mocked_urlopen: object
+    ) -> None:
+        mocked_urlopen.return_value = FakeResponse(  # type: ignore[attr-defined]
+            b'{"ok":true,"result":[]}'
+        )
+
+        self.client.get_updates(offset=42, timeout_seconds=30)
+
+        self.assertEqual(  # type: ignore[attr-defined]
+            mocked_urlopen.call_args.kwargs["timeout"], 35
+        )
+
+    @patch("daily_startups_bot.telegram.urlopen")
+    def test_non_polling_calls_keep_client_transport_timeout(
+        self, mocked_urlopen: object
+    ) -> None:
+        mocked_urlopen.return_value = FakeResponse(  # type: ignore[attr-defined]
+            b'{"ok":true,"result":{"message_id":1}}'
+        )
+        client = TelegramHTTPClient("test-secret-token", timeout_seconds=11)
+
+        client.send_message(42, "Digest")
+        client.set_my_name("Стартапы дня")
+
+        timeouts = [  # type: ignore[attr-defined]
+            call.kwargs["timeout"] for call in mocked_urlopen.call_args_list
+        ]
+        self.assertEqual(timeouts, [11, 11])
+
+    @patch("daily_startups_bot.telegram.urlopen")
     def test_normalizes_url_error_without_token(self, mocked_urlopen: object) -> None:
         mocked_urlopen.side_effect = URLError("connection refused")  # type: ignore[attr-defined]
 
