@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from daily_startups_bot.application import ApplicationCoordinator
 from daily_startups_bot.backend import BackendError
+from daily_startups_bot.checkpoint import OffsetCheckpointError
 from daily_startups_bot.delivery_worker import DeliveryWorker
 from daily_startups_bot.telegram import TelegramAPIError, TelegramTransportError
 
@@ -152,6 +153,11 @@ class ApplicationCoordinatorTest(unittest.TestCase):
                 "telegram_transport",
             ),
             ("delivery", BackendError("backend secret must not leak"), "backend"),
+            (
+                "command",
+                OffsetCheckpointError("save", "write_failed"),
+                "checkpoint",
+            ),
         )
         for failed_worker, failure, failure_kind in cases:
             with self.subTest(worker=failed_worker):
