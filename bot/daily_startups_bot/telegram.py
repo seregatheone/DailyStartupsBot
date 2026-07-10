@@ -9,6 +9,9 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
+_LONG_POLL_TIMEOUT_MARGIN_SECONDS = 5
+
+
 class TelegramClient(Protocol):
     def get_updates(self, offset: int | None, timeout_seconds: int) -> list[dict[str, Any]]:
         ...
@@ -40,7 +43,13 @@ class TelegramHTTPClient:
         params: dict[str, object] = {"timeout": timeout_seconds}
         if offset is not None:
             params["offset"] = offset
-        response = self._api("getUpdates", params)
+        response = self._api(
+            "getUpdates",
+            params,
+            request_timeout_seconds=(
+                timeout_seconds + _LONG_POLL_TIMEOUT_MARGIN_SECONDS
+            ),
+        )
         return list(response.get("result", []))
 
     def send_message(
@@ -91,15 +100,25 @@ class TelegramHTTPClient:
             payload,
         )
 
-    def _api(self, method: str, payload: dict[str, object]) -> dict[str, Any]:
+    def _api(
+        self,
+        method: str,
+        payload: dict[str, object],
+        request_timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
         data = urlencode(payload).encode("utf-8")
         request = Request(
             f"https://api.telegram.org/bot{self.token}/{method}",
             data=data,
             method="POST",
         )
+        timeout_seconds = (
+            self.timeout_seconds
+            if request_timeout_seconds is None
+            else request_timeout_seconds
+        )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
+            with urlopen(request, timeout=timeout_seconds) as response:
                 raw_body = response.read()
         except HTTPError as exc:
             try:

@@ -33,6 +33,8 @@ Bot:
 - `DAILY_STARTUPS_TELEGRAM_TOKEN`
 - `DAILY_STARTUPS_BACKEND_BASE_URL`
 - `DAILY_STARTUPS_POLL_TIMEOUT_SECONDS`
+- `DAILY_STARTUPS_DELIVERY_POLL_INTERVAL_SECONDS` (default: `30`)
+- `DAILY_STARTUPS_WORKER_RETRY_BACKOFF_SECONDS` (default: `5`)
 - `DAILY_STARTUPS_DRY_RUN`
 
 Не коммитьте реальные токены, API keys, локальные базы и сгенерированное runtime state.
@@ -161,6 +163,10 @@ DAILY_STARTUPS_TELEGRAM_TOKEN='replace-with-test-token' make apply-telegram-meta
 ## Операции
 
 Backend пишет JSON events для startup, ingestion cycles, digest generation, delivery queue, health, failures, skipped sources и dry-run output. Bot пишет JSON events для startup, polling, command handling, sends и delivery attempts.
+
+В live mode bot запускает параллельно ровно один command polling worker и один delivery polling worker с общими HTTP clients. Delivery worker опрашивает backend каждые `DAILY_STARTUPS_DELIVERY_POLL_INTERVAL_SECONDS`; после временной ошибки каждый worker повторяет свой цикл через `DAILY_STARTUPS_WORKER_RETRY_BACKOFF_SECONDS`, не останавливая второй worker. Оба значения задаются целыми положительными секундами.
+
+При shutdown общий stop signal прерывает cadence/backoff waits, после чего процесс дожидается завершения обоих workers. Уже выполняющийся Telegram long poll завершается в пределах запрошенного timeout плюс пятисекундный HTTP margin. Lifecycle и failure events не включают Telegram token, chat id, message contents или raw error text.
 
 Ответы на команды используют at-most-once policy. Если Telegram отклоняет reply или transport падает, bot записывает безопасную metadata, не повторяет reply автоматически, продолжает обработку batch и продвигает polling offset. Это защищает от duplicate replies и poison-update replay; reply text, bot tokens и raw Telegram descriptions в logs не попадают.
 
