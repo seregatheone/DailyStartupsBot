@@ -143,6 +143,122 @@ func TestServiceReturnsRecoverableErrorWhenSignalPersistenceFails(t *testing.T) 
 	}
 }
 
+func TestServiceAccountsForAdapterLevelSkippedItems(t *testing.T) {
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "rss", records: []SourceRecord{validRecord("ValidCo")}, skipped: 2,
+	}), nil)
+
+	result, err := service.Run(context.Background(), []config.SourceConfig{
+		{ID: "source", Active: true, AccessMethod: "rss"},
+	})
+	if err != nil {
+		t.Fatalf("run ingestion: %v", err)
+	}
+	if len(result.Sources) != 1 || result.Sources[0].Fetched != 3 || result.Sources[0].Normalized != 1 || result.Sources[0].Skipped != 2 {
+		t.Fatalf("unexpected adapter skip accounting: %#v", result.Sources)
+	}
+	if result.Sources[0].Message != "one or more source items were skipped" {
+		t.Fatalf("unexpected safe skip message: %q", result.Sources[0].Message)
+	}
+}
+
+func TestServiceRejectsInvalidAdapterAccounting(t *testing.T) {
+	store := &memoryStore{}
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "rss", skipped: -1,
+	}), store)
+
+	result, err := service.Run(context.Background(), []config.SourceConfig{
+		{ID: "source", Active: true, AccessMethod: "rss"},
+	})
+	if err != nil {
+		t.Fatalf("run ingestion: %v", err)
+	}
+	if len(result.Sources) != 1 || result.Sources[0].Status != StatusFailed || result.Sources[0].Fetched != 0 {
+		t.Fatalf("unexpected invalid adapter result: %#v", result.Sources)
+	}
+	if store.health["source"].LastError != "source adapter returned invalid result" {
+		t.Fatalf("invalid adapter result was not observable: %#v", store.health["source"])
+	}
+}
+
+func TestServicePropagatesParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "rss", err: context.Canceled,
+	}), nil)
+
+	result, err := service.Run(ctx, []config.SourceConfig{
+		{ID: "source", Active: true, AccessMethod: "rss"},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected parent cancellation, got %v", err)
+	}
+	if len(result.Sources) != 0 {
+		t.Fatalf("unexpected cancellation result: %#v", result.Sources)
+	}
+}
+
+func TestServiceAbortsWhenCancellationArrivesDuringFetch(t *testing.T) {
+	started := make(chan struct{})
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "rss",
+		fetch: func(ctx context.Context) (AdapterFetchResult, error) {
+			close(started)
+			<-ctx.Done()
+			return AdapterFetchResult{}, ctx.Err()
+		},
+	}), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Run(ctx, []config.SourceConfig{{ID: "source", Active: true, AccessMethod: "rss"}})
+		done <- err
+	}()
+	<-started
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation from active fetch, got %v", err)
+	}
+}
+
+func TestServiceExposesOnlySafeFeedFailureKind(t *testing.T) {
+	store := &memoryStore{}
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "rss", err: &FeedError{Kind: FeedErrorTimeout},
+	}), store)
+
+	result, err := service.Run(context.Background(), []config.SourceConfig{
+		{ID: "source", Active: true, AccessMethod: "rss"},
+	})
+	if err != nil {
+		t.Fatalf("run ingestion: %v", err)
+	}
+	want := "source fetch failed: timeout"
+	if len(result.Sources) != 1 || result.Sources[0].Message != want || store.health["source"].LastError != want {
+		t.Fatalf("safe feed failure kind was not propagated: result=%#v health=%#v", result.Sources, store.health["source"])
+	}
+}
+
+func TestServiceRejectsUnknownFeedFailureKind(t *testing.T) {
+	store := &memoryStore{}
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "rss", err: &FeedError{Kind: FeedErrorKind("https://secret.example")},
+	}), store)
+
+	result, err := service.Run(context.Background(), []config.SourceConfig{
+		{ID: "source", Active: true, AccessMethod: "rss"},
+	})
+	if err != nil {
+		t.Fatalf("run ingestion: %v", err)
+	}
+	want := "source fetch failed: network"
+	if result.Sources[0].Message != want || store.health["source"].LastError != want {
+		t.Fatalf("unknown failure kind leaked detail: result=%#v health=%#v", result.Sources, store.health["source"])
+	}
+}
+
 func validRecord(name string) SourceRecord {
 	return SourceRecord{
 		StartupName: name,
@@ -157,7 +273,9 @@ type fakeAdapter struct {
 	accessMethod        string
 	requiredCredentials []string
 	records             []SourceRecord
+	skipped             int
 	err                 error
+	fetch               func(context.Context) (AdapterFetchResult, error)
 }
 
 func (adapter fakeAdapter) Metadata() SourceMetadata {
@@ -169,11 +287,14 @@ func (adapter fakeAdapter) Metadata() SourceMetadata {
 	}
 }
 
-func (adapter fakeAdapter) Fetch(context.Context, config.SourceConfig) ([]SourceRecord, error) {
-	if adapter.err != nil {
-		return nil, adapter.err
+func (adapter fakeAdapter) Fetch(ctx context.Context, _ config.SourceConfig) (AdapterFetchResult, error) {
+	if adapter.fetch != nil {
+		return adapter.fetch(ctx)
 	}
-	return adapter.records, nil
+	if adapter.err != nil {
+		return AdapterFetchResult{}, adapter.err
+	}
+	return AdapterFetchResult{Records: adapter.records, Skipped: adapter.skipped}, nil
 }
 
 type memoryStore struct {

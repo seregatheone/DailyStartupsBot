@@ -55,6 +55,9 @@ func NewService(registry Registry, store SignalStore) Service {
 func (service Service) Run(ctx context.Context, configs []config.SourceConfig) (RunResult, error) {
 	registered, skipped := service.registry.Resolve(configs)
 	result := RunResult{Sources: append([]SourceResult(nil), skipped...)}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	var persistenceErrors []error
 
 	for _, skippedSource := range skipped {
@@ -70,14 +73,23 @@ func (service Service) Run(ctx context.Context, configs []config.SourceConfig) (
 				))
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 	}
 
 	for _, source := range registered {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		sourceResult, err := service.fetchSource(ctx, source, &result)
+		result.Sources = append(result.Sources, sourceResult)
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
 		if err != nil {
 			persistenceErrors = append(persistenceErrors, err)
 		}
-		result.Sources = append(result.Sources, sourceResult)
 	}
 
 	return result, errors.Join(persistenceErrors...)
@@ -88,24 +100,45 @@ func (service Service) fetchSource(
 	source RegisteredSource,
 	result *RunResult,
 ) (SourceResult, error) {
-	records, err := source.Adapter.Fetch(ctx, source.Config)
+	adapterResult, err := source.Adapter.Fetch(ctx, source.Config)
 	if err != nil {
-		healthErr := service.saveHealth(ctx, source.Config.ID, StatusFailed, sourceFetchFailure)
+		if ctx.Err() != nil {
+			return SourceResult{
+				SourceID: source.Config.ID,
+				Status:   StatusFailed,
+				Message:  "ingestion cancelled",
+			}, ctx.Err()
+		}
+		message := observableSourceFailure(err)
+		healthErr := service.saveHealth(ctx, source.Config.ID, StatusFailed, message)
 		return SourceResult{
 			SourceID: source.Config.ID,
 			Status:   StatusFailed,
-			Message:  sourceFetchFailure,
+			Message:  message,
+		}, healthErr
+	}
+	if !adapterResult.valid() {
+		message := "source adapter returned invalid result"
+		healthErr := service.saveHealth(ctx, source.Config.ID, StatusFailed, message)
+		return SourceResult{
+			SourceID: source.Config.ID,
+			Status:   StatusFailed,
+			Message:  message,
 		}, healthErr
 	}
 
 	sourceResult := SourceResult{
 		SourceID: source.Config.ID,
 		Status:   StatusOK,
-		Fetched:  len(records),
+		Fetched:  len(adapterResult.Records) + adapterResult.Skipped,
+		Skipped:  adapterResult.Skipped,
+	}
+	if adapterResult.Skipped > 0 {
+		sourceResult.Message = "one or more source items were skipped"
 	}
 	var persistenceErrors []error
 
-	for _, record := range records {
+	for _, record := range adapterResult.Records {
 		signal, err := NormalizeSignal(source.Config.ID, record)
 		if err != nil {
 			sourceResult.Skipped++
@@ -158,4 +191,12 @@ func appendMessage(existing, next string) string {
 		return next
 	}
 	return existing + "; " + next
+}
+
+func observableSourceFailure(err error) string {
+	var feedErr *FeedError
+	if errors.As(err, &feedErr) {
+		return sourceFetchFailure + ": " + string(feedErr.safeKind())
+	}
+	return sourceFetchFailure
 }

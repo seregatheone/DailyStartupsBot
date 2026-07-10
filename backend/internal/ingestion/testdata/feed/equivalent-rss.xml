@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example feed</title>
+    <item>
+      <guid>example-acme-launch</guid>
+      <title>Acme AI launches workflow platform</title>
+      <link>https://source.example/acme-launch</link>
+      <pubDate>Thu, 09 Jul 2026 08:00:00 +0000</pubDate>
+      <description>&lt;b&gt;Workflow&lt;/b&gt; &amp;amp; automation for growing teams.</description>
+      <category>AI</category>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Partial feed</title>
+    <item>
+      <guid>missing-title</guid>
+      <link>https://source.example/missing-title</link>
+      <pubDate>Thu, 09 Jul 2026 07:00:00 +0000</pubDate>
+      <description>This item is intentionally missing a required title.</description>
+    </item>
+    <item>
+      <guid>valid-launch</guid>
+      <title>ValidCo launches product</title>
+      <link>https://source.example/valid-launch</link>
+      <pubDate>Thu, 09 Jul 2026 08:00:00 +0000</pubDate>
+      <description>Valid product launch.</description>
+    </item>
+  </channel>
+</rss>

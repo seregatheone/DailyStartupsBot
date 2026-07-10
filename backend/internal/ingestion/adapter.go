@@ -9,7 +9,16 @@ import (
 
 type SourceAdapter interface {
 	Metadata() SourceMetadata
-	Fetch(context.Context, config.SourceConfig) ([]SourceRecord, error)
+	Fetch(context.Context, config.SourceConfig) (AdapterFetchResult, error)
+}
+
+type AdapterFetchResult struct {
+	Records []SourceRecord
+	Skipped int
+}
+
+func (result AdapterFetchResult) valid() bool {
+	return result.Skipped >= 0
 }
 
 type SourceMetadata struct {

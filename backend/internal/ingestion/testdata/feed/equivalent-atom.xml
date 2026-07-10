@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example feed</title>
+  <id>https://source.example/feed</id>
+  <updated>2026-07-09T08:00:00Z</updated>
+  <entry>
+    <id>example-acme-launch</id>
+    <title>Acme AI launches workflow platform</title>
+    <link rel="alternate" href="https://source.example/acme-launch" />
+    <updated>2026-07-09T08:00:00Z</updated>
+    <summary>&lt;b&gt;Workflow&lt;/b&gt; &amp;amp; automation for growing teams.</summary>
+    <category term="AI" />
+  </entry>
+</feed>
