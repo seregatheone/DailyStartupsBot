@@ -1,4 +1,6 @@
+import io
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -11,6 +13,7 @@ from daily_startups_bot.app import (
     startup_message,
 )
 from daily_startups_bot.config import BotConfig
+from daily_startups_bot.process_lock import ProcessLockError
 
 
 class StartupMessageTest(unittest.TestCase):
@@ -110,18 +113,137 @@ class StartupMessageTest(unittest.TestCase):
         )
         application.run_forever.assert_called_once_with()
 
-    @patch("daily_startups_bot.app.run_live_application")
-    @patch("daily_startups_bot.app.build_application")
+    @patch("daily_startups_bot.app.run_live_bot")
     @patch("daily_startups_bot.app.load_config")
     def test_main_runs_coordinator_in_live_mode(
-        self, load: Mock, build: Mock, run: Mock
+        self, load: Mock, run: Mock
     ) -> None:
         load.return_value = BotConfig(telegram_token="test-token", dry_run=False)
 
         app.main()
 
-        build.assert_called_once_with(load.return_value)
-        run.assert_called_once_with(build.return_value)
+        run.assert_called_once_with(load.return_value)
+
+    def test_live_bot_holds_lock_around_build_and_application(self) -> None:
+        config = BotConfig(
+            telegram_token="test-token",
+            bot_lock_path="/private/runtime/bot.lock",
+            dry_run=False,
+        )
+        order: list[str] = []
+        process_lock = Mock()
+        process_lock.acquire.side_effect = lambda: order.append("acquire")
+        process_lock.release.side_effect = lambda: order.append("release")
+        application = Mock()
+
+        with (
+            patch(
+                "daily_startups_bot.app.FileProcessLock",
+                return_value=process_lock,
+            ) as lock_type,
+            patch(
+                "daily_startups_bot.app.build_application",
+                side_effect=lambda _config: (
+                    order.append("build"),
+                    application,
+                )[1],
+            ) as build,
+            patch(
+                "daily_startups_bot.app.run_live_application",
+                side_effect=lambda _application: order.append("run"),
+            ) as run,
+            patch("daily_startups_bot.app.log_event") as event,
+        ):
+            app.run_live_bot(config)
+
+        self.assertEqual(order, ["acquire", "build", "run", "release"])
+        lock_type.assert_called_once_with(Path(config.bot_lock_path))
+        build.assert_called_once_with(config)
+        run.assert_called_once_with(application)
+        event.assert_any_call("bot_process_lock_acquired")
+        event.assert_any_call("bot_process_lock_released")
+
+    def test_main_lock_conflict_exits_before_build_without_sensitive_output(
+        self,
+    ) -> None:
+        secret_path = "/private/secret-token/runtime/bot.lock"
+        config = BotConfig(
+            telegram_token="secret-token",
+            bot_lock_path=secret_path,
+            dry_run=False,
+        )
+        process_lock = Mock()
+        process_lock.acquire.side_effect = ProcessLockError(
+            "acquire", "already_running"
+        )
+        stderr = io.StringIO()
+
+        with (
+            patch("daily_startups_bot.app.load_config", return_value=config),
+            patch(
+                "daily_startups_bot.app.FileProcessLock",
+                return_value=process_lock,
+            ),
+            patch("daily_startups_bot.app.build_application") as build,
+            patch("daily_startups_bot.app.log_event") as event,
+            redirect_stderr(stderr),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                app.main()
+
+        self.assertEqual(raised.exception.code, 2)
+        build.assert_not_called()
+        event.assert_any_call(
+            "bot_process_lock_failure",
+            operation="acquire",
+            reason="already_running",
+        )
+        self.assertIn("already running", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertNotIn(secret_path, stderr.getvalue())
+        self.assertNotIn(config.telegram_token, stderr.getvalue())
+        self.assertNotIn(secret_path, str(event.call_args_list))
+        self.assertNotIn(config.telegram_token, str(event.call_args_list))
+
+    def test_dry_run_does_not_acquire_process_lock_or_build_application(
+        self,
+    ) -> None:
+        config = BotConfig(dry_run=True)
+        with (
+            patch("daily_startups_bot.app.load_config", return_value=config),
+            patch("daily_startups_bot.app.FileProcessLock") as lock_type,
+            patch("daily_startups_bot.app.build_application") as build,
+        ):
+            app.main()
+
+        lock_type.assert_not_called()
+        build.assert_not_called()
+
+    def test_live_bot_releases_lock_when_application_startup_fails(self) -> None:
+        config = BotConfig(
+            telegram_token="test-token",
+            bot_lock_path="/private/runtime/bot.lock",
+            dry_run=False,
+        )
+        process_lock = Mock()
+        failure = RuntimeError("application startup failed")
+
+        with (
+            patch(
+                "daily_startups_bot.app.FileProcessLock",
+                return_value=process_lock,
+            ),
+            patch(
+                "daily_startups_bot.app.build_application",
+                side_effect=failure,
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                app.run_live_bot(config)
+
+        self.assertIs(raised.exception, failure)
+        process_lock.acquire.assert_called_once_with()
+        process_lock.release.assert_called_once_with()
 
 
 if __name__ == "__main__":

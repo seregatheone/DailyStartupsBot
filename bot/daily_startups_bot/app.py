@@ -1,4 +1,5 @@
 import signal
+import sys
 from pathlib import Path
 
 from daily_startups_bot.application import ApplicationCoordinator
@@ -9,6 +10,7 @@ from daily_startups_bot.config import BotConfig, load_config, redacted_config
 from daily_startups_bot.delivery_worker import DeliveryWorker
 from daily_startups_bot.events import log_event
 from daily_startups_bot.polling import Poller
+from daily_startups_bot.process_lock import FileProcessLock, ProcessLockError
 from daily_startups_bot.telegram import TelegramHTTPClient
 
 
@@ -65,9 +67,51 @@ def run_live_application(application: ApplicationCoordinator) -> None:
             signal.signal(signum, handler)
 
 
+def run_live_bot(config: BotConfig) -> None:
+    process_lock = FileProcessLock(Path(config.bot_lock_path))
+    try:
+        process_lock.acquire()
+    except ProcessLockError as exc:
+        _log_process_lock_failure(exc)
+        raise
+
+    log_event("bot_process_lock_acquired")
+    application_failed = False
+    try:
+        run_live_application(build_application(config))
+    except BaseException:
+        application_failed = True
+        raise
+    finally:
+        try:
+            process_lock.release()
+        except ProcessLockError as exc:
+            _log_process_lock_failure(exc)
+            if not application_failed:
+                raise
+        else:
+            log_event("bot_process_lock_released")
+
+
+def _log_process_lock_failure(exc: ProcessLockError) -> None:
+    log_event(
+        "bot_process_lock_failure",
+        operation=exc.operation,
+        reason=exc.reason,
+    )
+
+
 def main() -> None:
     config = load_config()
     log_event("bot_startup", config=redacted_config(config))
     print(startup_message(config))
     if not config.dry_run:
-        run_live_application(build_application(config))
+        try:
+            run_live_bot(config)
+        except ProcessLockError as exc:
+            if exc.reason == "already_running":
+                message = "DailyStartupsBot live mode is already running."
+            else:
+                message = "DailyStartupsBot process lock is unavailable."
+            print(message, file=sys.stderr)
+            raise SystemExit(2) from None

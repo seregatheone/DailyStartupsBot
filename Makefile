@@ -1,12 +1,15 @@
-.PHONY: test test-backend test-bot check-localization apply-telegram-metadata run-backend dry-run-backend run-bot
+.PHONY: test test-backend test-bot test-ops check-localization apply-telegram-metadata run-backend dry-run-backend run-bot live-up live-smoke
 
-test: test-backend test-bot check-localization
+test: test-backend test-bot test-ops check-localization
 
 test-backend:
 	cd backend && go test ./...
 
 test-bot:
 	cd bot && python3 -m unittest discover -s tests
+
+test-ops:
+	python3 -m unittest discover -s scripts/tests
 
 check-localization:
 	cd bot && python3 -m unittest discover -s tests -p 'test_localization.py'
@@ -23,3 +26,9 @@ dry-run-backend:
 
 run-bot:
 	cd bot && python3 -m daily_startups_bot
+
+live-up:
+	python3 scripts/live.py run
+
+live-smoke:
+	python3 scripts/live.py smoke

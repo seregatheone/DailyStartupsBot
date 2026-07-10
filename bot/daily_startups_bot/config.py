@@ -12,6 +12,7 @@ class BotConfig:
     backend_base_url: str = "http://127.0.0.1:8080"
     polling_timeout_seconds: int = 30
     polling_offset_path: str = "./data/telegram-offset.json"
+    bot_lock_path: str = "./data/bot.lock"
     delivery_poll_interval_seconds: int = 30
     worker_retry_backoff_seconds: int = 5
     dry_run: bool = True
@@ -31,6 +32,9 @@ def load_config(env: dict[str, str] | None = None) -> BotConfig:
         polling_offset_path=values.get(
             "DAILY_STARTUPS_POLL_OFFSET_PATH", "./data/telegram-offset.json"
         ).strip(),
+        bot_lock_path=values.get(
+            "DAILY_STARTUPS_BOT_LOCK_PATH", "./data/bot.lock"
+        ).strip(),
         delivery_poll_interval_seconds=_int_value(
             values.get("DAILY_STARTUPS_DELIVERY_POLL_INTERVAL_SECONDS"), 30
         ),
@@ -48,6 +52,8 @@ def validate_config(config: BotConfig) -> None:
         raise ValueError("DAILY_STARTUPS_POLL_TIMEOUT_SECONDS must be positive")
     if not config.polling_offset_path.strip():
         raise ValueError("DAILY_STARTUPS_POLL_OFFSET_PATH is required")
+    if not config.bot_lock_path.strip():
+        raise ValueError("DAILY_STARTUPS_BOT_LOCK_PATH is required")
     if config.delivery_poll_interval_seconds < 1:
         raise ValueError(
             "DAILY_STARTUPS_DELIVERY_POLL_INTERVAL_SECONDS must be positive"
@@ -71,6 +77,7 @@ def redacted_config(config: BotConfig) -> dict[str, object]:
         "backend_base_url": config.backend_base_url,
         "polling_timeout_seconds": config.polling_timeout_seconds,
         "polling_offset_path": "[CONFIGURED]",
+        "bot_lock_path": "[CONFIGURED]",
         "delivery_poll_interval_seconds": config.delivery_poll_interval_seconds,
         "worker_retry_backoff_seconds": config.worker_retry_backoff_seconds,
         "dry_run": config.dry_run,

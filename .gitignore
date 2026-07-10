@@ -19,6 +19,7 @@ build/
 backend/data/
 bot/data/
 logs/
+.runtime/
 
 # Node
 node_modules/
