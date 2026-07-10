@@ -5,12 +5,12 @@ TBD - created by archiving change add-daily-startup-telegram-bot. Update Purpose
 ## Requirements
 ### Requirement: Telegram onboarding commands
 
-The system SHALL support Telegram commands for onboarding and basic help.
+The system SHALL support Telegram commands for concise subscription-first onboarding and basic help.
 
 #### Scenario: User sends start command
 
 - **WHEN** a Telegram user sends `/start`
-- **THEN** the bot explains the daily startup digest and offers subscription instructions
+- **THEN** the bot briefly explains the daily startup digest, offers `/subscribe` as the only explicit next action, and does not enumerate preference fields
 
 #### Scenario: User sends help command
 

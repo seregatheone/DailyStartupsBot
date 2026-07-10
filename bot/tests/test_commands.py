@@ -88,8 +88,13 @@ class CommandsTest(unittest.TestCase):
         self.router.handle_update(update("/help"))
 
         self.assertEqual(self.backend.calls, [])
-        self.assertIn("ежедневный дайджест стартапов", self.telegram.sent[0][1])
-        self.assertIn("/subscribe", self.telegram.sent[1][1])
+        self.assertEqual(
+            self.telegram.sent[0][1],
+            "DailyStartupsBot присылает краткий ежедневный дайджест стартапов. "
+            "Отправьте /subscribe, чтобы подписаться.",
+        )
+        self.assertNotIn("/preferences", self.telegram.sent[0][1])
+        self.assertIn("/preferences", self.telegram.sent[1][1])
 
     def test_subscription_commands_delegate_to_backend(self) -> None:
         self.router.handle_update(update("/subscribe"))
