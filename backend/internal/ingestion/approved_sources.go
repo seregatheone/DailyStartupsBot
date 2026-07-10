@@ -21,21 +21,58 @@ var approvedSourceCatalogJSON []byte
 
 var (
 	hackerNewsShowSourceID      = "hacker-news-show"
+	techCrunchStartupsSourceID  = "techcrunch-startups"
+	euStartupsSourceID          = "eu-startups"
 	approvedEventHeadline       = regexp.MustCompile(`(?i)^(.+?)\s+(raises|secures|launches|wins|receives|acquires|is acquired by)\b`)
 	approvedFundingAmount       = regexp.MustCompile(`(?i)([£$€])(\d+(?:\.\d+)?)\s*(million|billion|m|bn)\b`)
 	approvedFundingRound        = regexp.MustCompile(`(?i)\b(pre-seed|seed|series\s+[a-z]|growth)\b`)
 	approvedAggregateName       = regexp.MustCompile(`(?i)\b(businesses|companies|consortium|consortia|entrepreneurs|firms|founders|funds|lenders|organisations|organizations|portfolio|programmes|programs|projects|researchers|schemes|spinouts|start-?ups|universities)\b`)
 	approvedAggregateQuantifier = regexp.MustCompile(`(?i)^\s*(a group of|dozens|hundreds|many|multiple|several|thousands|various)\b`)
 	approvedNumericSubject      = regexp.MustCompile(`^\s*\d+\s`)
-	approvedSourcePolicies      = map[string]approvedSourcePolicy{
+	startupNewsEventHeadline    = regexp.MustCompile(`(?i)^(.+?)\s+(raises|secures|closes|launches|debuts|enters|expands)\b(.+)$`)
+	startupNewsEditorial        = regexp.MustCompile(`(?i)^\s*(analysis|comment|editorial|explainer|how|opinion|round-?up|the week|top\s+\d+|weekly|what|why)\b`)
+	startupNewsExcludedEvent    = regexp.MustCompile(`(?i)\b(acquires|acquired|acquisition|merger|m&a)\b`)
+	startupNewsMultipleSubject  = regexp.MustCompile(`(?i)(\s(?:and|versus|vs\.?)\s|[,/&+])`)
+	startupNewsFundSubject      = regexp.MustCompile(`(?i)\b(fund|funds|investor|investors|venture capital|vc)\b`)
+	startupNewsGenericSubject   = regexp.MustCompile(`(?i)\b(start-?up|scale-?up)\b`)
+	startupNewsPeopleSubject    = regexp.MustCompile(`(?i)\b(ceo|chief|co-?founder|executive|exec|founder|investor|partner)\b`)
+	startupNewsFundingContext   = regexp.MustCompile(`(?i)\b(funding|investment|round)\b`)
+	startupNewsLaunchExcluded   = regexp.MustCompile(`(?i)\b(conference|event|fund|funds|list|programme|program|report|summit|webinar)\b`)
+	startupNewsLaunchObject     = regexp.MustCompile(`(?i)\b(api|app|application|device|marketplace|model|network|platform|product|service|software|solution|system|technology|tool)\b`)
+	startupNewsBasedPrefix      = regexp.MustCompile(`(?i)^[[:alpha:]][[:alpha:] -]{0,40}-based\s+`)
+	startupNewsGenericPrefix    = regexp.MustCompile(`(?i)^(a|an|new|stealth|the|this|unnamed)\b`)
+	startupNewsFundingRound     = regexp.MustCompile(`(?i)\b(?:(pre-seed|seed|growth)\s+(?:funding\s+)?round|(series\s+[a-z]))\b`)
+	startupNewsGenericNameWords = map[string]struct{}{
+		"app": {}, "application": {}, "company": {}, "platform": {}, "product": {},
+		"service": {}, "solution": {}, "technology": {}, "tool": {},
+	}
+	approvedSourcePolicies = map[string]approvedSourcePolicy{
 		"innovate-uk": {
 			DeniedSubjects: []string{"innovate uk", "uk government", "government", "programme", "projects", "businesses"},
+			AccessMethod:   "atom",
+			Tags:           []string{"public", "govuk", "startup"},
 		},
 		"uk-research-and-innovation": {
 			DeniedSubjects: []string{"uk research and innovation", "ukri", "universities", "university", "researchers", "research"},
+			AccessMethod:   "atom",
+			Tags:           []string{"public", "govuk", "startup"},
 		},
 		"british-business-bank": {
 			DeniedSubjects: []string{"british business bank", "bank", "fund", "portfolio", "scheme", "report", "research"},
+			AccessMethod:   "atom",
+			Tags:           []string{"public", "govuk", "startup"},
+		},
+		techCrunchStartupsSourceID: {
+			DeniedSubjects: []string{"techcrunch", "tech crunch"},
+			AccessMethod:   "rss",
+			Tags:           []string{"public", "rss", "startup", "funding", "launch"},
+			StartupNews:    true,
+		},
+		euStartupsSourceID: {
+			DeniedSubjects: []string{"eu-startups", "eu startups"},
+			AccessMethod:   "rss",
+			Tags:           []string{"public", "rss", "startup", "funding", "launch"},
+			StartupNews:    true,
 		},
 	}
 	runtimeCatalogOnce sync.Once
@@ -45,6 +82,9 @@ var (
 
 type approvedSourcePolicy struct {
 	DeniedSubjects []string
+	AccessMethod   string
+	Tags           []string
+	StartupNews    bool
 }
 
 type runtimeSourceCatalog struct {
@@ -167,12 +207,12 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 	seen := make(map[string]bool, len(catalog.Sources))
 	seenEndpoints := make(map[string]bool, len(catalog.Sources))
 	for _, source := range catalog.Sources {
-		policy, isGOVUKSource := approvedSourcePolicies[source.ID]
+		policy, isFeedSource := approvedSourcePolicies[source.ID]
 		isHackerNewsSource := source.ID == hackerNewsShowSourceID
-		if (!isGOVUKSource && !isHackerNewsSource) || seen[source.ID] || source.Status != "approved" || len(source.Credentials) != 0 {
+		if (!isFeedSource && !isHackerNewsSource) || seen[source.ID] || source.Status != "approved" || len(source.Credentials) != 0 {
 			return Registry{}, nil, errors.New("approved source catalog contains unsupported source")
 		}
-		if (isGOVUKSource && source.AccessMethod != "atom") || (isHackerNewsSource && source.AccessMethod != "api") {
+		if (isFeedSource && source.AccessMethod != policy.AccessMethod) || (isHackerNewsSource && source.AccessMethod != "api") {
 			return Registry{}, nil, errors.New("approved source catalog contains unsupported access method")
 		}
 		seen[source.ID] = true
@@ -193,7 +233,7 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 			return Registry{}, nil, errors.New("approved source catalog runtime policy is incomplete")
 		}
 
-		tags := []string{"public", "govuk", "startup"}
+		tags := append([]string(nil), policy.Tags...)
 		qualityPolicy := QualityPolicy{
 			MaxAge:        time.Duration(source.ExpectedFreshnessHours) * time.Hour,
 			MaxFutureSkew: 15 * time.Minute,
@@ -253,8 +293,9 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 			RateLimit:    source.RequestPolicy.RateLimit,
 		})
 	}
-	if !seen[hackerNewsShowSourceID] || len(seen) != len(approvedSourcePolicies)+1 {
-		return Registry{}, nil, errors.New("approved source catalog is missing required launch source")
+	if !seen[hackerNewsShowSourceID] || !seen[techCrunchStartupsSourceID] || !seen[euStartupsSourceID] ||
+		len(seen) != len(approvedSourcePolicies)+1 {
+		return Registry{}, nil, errors.New("approved source catalog is missing required productive source")
 	}
 	return NewRegistry(adapters...), configs, nil
 }
@@ -298,6 +339,9 @@ func cloneSourceConfigs(sources []config.SourceConfig) []config.SourceConfig {
 }
 
 func approvedSourceMapper(policy approvedSourcePolicy) FeedMapper {
+	if policy.StartupNews {
+		return startupNewsSourceMapper(policy)
+	}
 	return func(item FeedItem) (SourceRecord, error) {
 		match := approvedEventHeadline.FindStringSubmatch(strings.TrimSpace(item.Title))
 		if len(match) != 3 {
@@ -342,6 +386,120 @@ func approvedSourceMapper(policy approvedSourcePolicy) FeedMapper {
 			RawPayload:  "",
 		}, nil
 	}
+}
+
+func startupNewsSourceMapper(policy approvedSourcePolicy) FeedMapper {
+	return func(item FeedItem) (SourceRecord, error) {
+		title := strings.TrimSpace(item.Title)
+		if startupNewsEditorial.MatchString(title) || startupNewsExcludedEvent.MatchString(title) {
+			return SourceRecord{}, errors.New("headline is editorial or excluded news")
+		}
+		match := startupNewsEventHeadline.FindStringSubmatch(title)
+		if len(match) != 4 {
+			return SourceRecord{}, errors.New("headline has no approved startup-news event")
+		}
+		startupName := cleanStartupNewsName(match[1])
+		if !isApprovedStartupName(startupName, policy.DeniedSubjects) ||
+			startupNewsMultipleSubject.MatchString(startupName) || startupNewsFundSubject.MatchString(startupName) ||
+			startupNewsGenericSubject.MatchString(startupName) || startupNewsPeopleSubject.MatchString(startupName) ||
+			!isNamedStartupNewsCompany(startupName) || len(strings.Fields(startupName)) > 8 {
+			return SourceRecord{}, errors.New("headline subject is not one unambiguous startup")
+		}
+
+		verb := strings.ToLower(match[2])
+		tail := strings.TrimSpace(match[3])
+		funding := explicitStartupNewsFunding(title)
+		signalType := "launch"
+		switch verb {
+		case "raises", "secures", "closes":
+			if funding.Amount == "" && funding.Round == "" && !startupNewsFundingContext.MatchString(tail) {
+				return SourceRecord{}, errors.New("funding headline has no explicit funding context")
+			}
+			signalType = "funding"
+		case "launches", "debuts":
+			if startupNewsLaunchExcluded.MatchString(tail) || !startupNewsLaunchObject.MatchString(tail) {
+				return SourceRecord{}, errors.New("launch headline has no approved product object")
+			}
+		case "enters":
+			if !strings.Contains(strings.ToLower(tail), "market") {
+				return SourceRecord{}, errors.New("market-entry headline has no explicit market")
+			}
+		case "expands":
+			lowerTail := strings.ToLower(tail)
+			if !strings.Contains(lowerTail, " into ") && !strings.HasPrefix(lowerTail, "into ") &&
+				!strings.Contains(lowerTail, " across ") && !strings.HasPrefix(lowerTail, "across ") {
+				return SourceRecord{}, errors.New("expansion headline has no explicit market entry")
+			}
+		}
+
+		return SourceRecord{
+			StartupName: startupName,
+			SourceURL:   item.SourceURL,
+			SignalType:  signalType,
+			PublishedAt: item.PublishedAt,
+			Description: "",
+			Categories:  []string{},
+			Funding:     funding,
+			RawPayload:  "",
+		}, nil
+	}
+}
+
+func cleanStartupNewsName(name string) string {
+	name = startupNewsBasedPrefix.ReplaceAllString(strings.TrimSpace(name), "")
+	lowerName := strings.ToLower(name)
+	for _, marker := range []string{" startup ", " scaleup "} {
+		if index := strings.LastIndex(lowerName, marker); index >= 0 {
+			name = name[index+len(marker):]
+			lowerName = strings.ToLower(name)
+		}
+	}
+	return strings.TrimSpace(name)
+}
+
+func isNamedStartupNewsCompany(name string) bool {
+	if startupNewsGenericPrefix.MatchString(name) {
+		return false
+	}
+	words := strings.Fields(name)
+	for _, word := range words {
+		word = strings.TrimFunc(word, func(character rune) bool {
+			return !unicode.IsLetter(character) && !unicode.IsDigit(character)
+		})
+		if word == "" {
+			return false
+		}
+		if _, generic := startupNewsGenericNameWords[strings.ToLower(word)]; generic {
+			return false
+		}
+		first, _ := utf8.DecodeRuneInString(word)
+		if unicode.IsLower(first) {
+			hasInternalUpper := false
+			for index, character := range word {
+				if index > 0 && unicode.IsUpper(character) {
+					hasInternalUpper = true
+					break
+				}
+			}
+			if !hasInternalUpper {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func explicitStartupNewsFunding(title string) Funding {
+	funding := explicitFunding(title)
+	funding.Round = ""
+	if round := startupNewsFundingRound.FindStringSubmatch(title); len(round) == 3 {
+		if round[1] != "" {
+			funding.Round = strings.ToLower(strings.Join(strings.Fields(round[1]), " "))
+		} else {
+			funding.Round = strings.ToLower(strings.Join(strings.Fields(round[2]), " "))
+		}
+	}
+	return funding
 }
 
 func isApprovedStartupName(name string, denied []string) bool {

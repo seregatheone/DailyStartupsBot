@@ -465,6 +465,236 @@
         "serve_stale_as_new": false
       },
       "fixture": "testdata/source_catalog/hacker-news-show.json"
+    },
+    {
+      "id": "techcrunch-startups",
+      "display_name": "TechCrunch",
+      "status": "approved",
+      "publisher_page_url": "https://techcrunch.com/category/startups/",
+      "publisher_access_url": "https://techcrunch.com/rss-terms-of-use/",
+      "feed_url": "https://techcrunch.com/category/startups/feed/",
+      "terms_url": "https://techcrunch.com/rss-terms-of-use/",
+      "attribution_label": "TechCrunch RSS",
+      "attribution_notice": "headline metadata",
+      "reuse_policy": "TechCrunch RSS terms require unmodified feed display with attribution and an article link. The digest therefore does not republish or transform feed descriptions; it stores only independently extracted factual headline metadata and the exact publisher link.",
+      "reuse_mode": "factual_metadata_only",
+      "reuse_requirements": [
+        "Show TechCrunch as the publisher and link the exact article supplied by the RSS item.",
+        "Show the TechCrunch RSS attribution label and link the publisher's RSS terms.",
+        "Do not add advertising to the feed, fetch article pages, mirror article bodies, images or authors, or remove publisher attribution."
+      ],
+      "access_method": "rss",
+      "credentials": [],
+      "access_evidence": {
+        "publisher_advertised_feed": true,
+        "reuse_verified": true,
+        "probed_at": "2026-07-10",
+        "http_status": 200,
+        "content_type": "application/rss+xml"
+      },
+      "request_policy": {
+        "cadence_minutes": 60,
+        "timeout_seconds": 10,
+        "max_redirects": 3,
+        "max_response_bytes": 1048576,
+        "max_items": 50,
+        "rate_limit": "at most one request per 60 minutes",
+        "redirect_policy": "maximum 3 redirects; every hop and final URL must remain HTTPS on techcrunch.com",
+        "user_agent_required": true
+      },
+      "expected_freshness_hours": 168,
+      "accepted_item_policy": "Accept only one named company immediately followed by an explicit funding, product launch, debut or market-entry verb. Product launches require a reviewed object noun; funding must include an amount, explicit round or funding context. Reject generic noun phrases, editorials, round-ups, lists, advice, events, funds, acquisitions, people stories and multi-company subjects.",
+      "field_mapping": {
+        "startup_name": {
+          "source": "item.title",
+          "rule": "Extract the single named company subject adjacent to an approved event verb, removing only a bounded location-based or startup/scaleup descriptor prefix and rejecting generic noun phrases.",
+          "on_missing": "skip"
+        },
+        "canonical_url": {
+          "source": "none",
+          "rule": "The RSS item exposes a publisher article, not a structured company homepage; never treat the article as canonical company URL.",
+          "on_missing": "empty"
+        },
+        "source_url": {
+          "source": "item.link",
+          "rule": "Require an absolute HTTPS techcrunch.com article URL and retain it exactly for publisher attribution.",
+          "on_missing": "skip"
+        },
+        "signal_type": {
+          "source": "item.title",
+          "rule": "raises/secures/closes maps to funding; launches/debuts/explicit market entry maps to launch.",
+          "on_missing": "skip"
+        },
+        "published_at": {
+          "source": "item.pubDate",
+          "rule": "Parse the feed timestamp with timezone and convert to UTC; never substitute fetch time.",
+          "on_missing": "skip"
+        },
+        "description": {
+          "source": "none",
+          "rule": "Leave empty: transforming the publisher description would conflict with TechCrunch RSS terms, and the digest does not reproduce feed content.",
+          "on_missing": "empty"
+        },
+        "region": {
+          "source": "none",
+          "rule": "Publisher scope or a location descriptor in the headline does not prove company region.",
+          "on_missing": "empty"
+        },
+        "categories": {
+          "source": "none",
+          "rule": "Publisher categories are not a reviewed stable product taxonomy.",
+          "on_missing": "empty"
+        },
+        "funding": {
+          "source": "item.title",
+          "rule": "Populate amount and currency only when explicit; populate round only for Series X or an explicit pre-seed/seed/growth round phrase; investors remain empty.",
+          "on_missing": "empty"
+        },
+        "raw_payload": {
+          "source": "none",
+          "rule": "Ignore author, encoded content, images and extension fields; store no raw XML and fetch no article page.",
+          "on_missing": "empty"
+        }
+      },
+      "fixture_expected": {
+        "startup_name": "LedgerLeap",
+        "canonical_url": "",
+        "source_url": "https://techcrunch.com/2026/07/09/ledgerleap-raises-series-a/",
+        "signal_type": "funding",
+        "published_at": "2026-07-09T10:00:00Z",
+        "description": "",
+        "region": "",
+        "categories": [],
+        "funding": {
+          "round": "series a",
+          "amount": "18 million",
+          "currency": "USD",
+          "investors": []
+        },
+        "raw_payload": ""
+      },
+      "fallback_policy": {
+        "on_failure": "mark this source degraded and continue other sources",
+        "retry": "next scheduled cadence with bounded backoff",
+        "html_scraping": false,
+        "serve_stale_as_new": false
+      },
+      "fixture": "testdata/source_catalog/techcrunch-startups.xml"
+    },
+    {
+      "id": "eu-startups",
+      "display_name": "EU-Startups",
+      "status": "approved",
+      "publisher_page_url": "https://www.eu-startups.com/",
+      "publisher_access_url": "https://www.eu-startups.com/about/",
+      "feed_url": "https://www.eu-startups.com/feed/",
+      "terms_url": "https://www.eu-startups.com/about/",
+      "attribution_label": "EU-Startups RSS",
+      "attribution_notice": "headline metadata",
+      "reuse_policy": "EU-Startups publicly advertises an RSS channel and identifies Menlo Media as publisher but publishes no explicit RSS content-reuse grant. The digest therefore stores only independently extracted factual headline metadata and the exact publisher link; it does not reproduce descriptions or other feed content.",
+      "reuse_mode": "factual_metadata_only",
+      "reuse_requirements": [
+        "Show EU-Startups as the publisher and link the exact article supplied by the RSS item.",
+        "Identify the result as EU-Startups RSS headline metadata and keep publisher ownership clear.",
+        "Do not fetch or reproduce article bodies, images, author data, tracking markup or raw XML."
+      ],
+      "access_method": "rss",
+      "credentials": [],
+      "access_evidence": {
+        "publisher_advertised_feed": true,
+        "reuse_verified": false,
+        "probed_at": "2026-07-10",
+        "http_status": 200,
+        "content_type": "application/rss+xml"
+      },
+      "request_policy": {
+        "cadence_minutes": 60,
+        "timeout_seconds": 10,
+        "max_redirects": 3,
+        "max_response_bytes": 1048576,
+        "max_items": 50,
+        "rate_limit": "at most one request per 60 minutes",
+        "redirect_policy": "maximum 3 redirects; every hop and final URL must remain HTTPS on www.eu-startups.com",
+        "user_agent_required": true
+      },
+      "expected_freshness_hours": 168,
+      "accepted_item_policy": "Accept only one named company immediately followed by an explicit funding, product launch, debut or market-entry verb. Product launches require a reviewed object noun; funding must include an amount, explicit round or funding context. Reject generic noun phrases, editorials, round-ups, lists, advice, event promotion, funds, acquisitions, people stories and multi-company subjects.",
+      "field_mapping": {
+        "startup_name": {
+          "source": "item.title",
+          "rule": "Extract the single named company subject adjacent to an approved event verb, removing only a bounded location-based or startup/scaleup descriptor prefix and rejecting generic noun phrases.",
+          "on_missing": "skip"
+        },
+        "canonical_url": {
+          "source": "none",
+          "rule": "The RSS item exposes a publisher article, not a structured company homepage; never treat the article as canonical company URL.",
+          "on_missing": "empty"
+        },
+        "source_url": {
+          "source": "item.link",
+          "rule": "Require an absolute HTTPS www.eu-startups.com article URL and retain it exactly for publisher attribution.",
+          "on_missing": "skip"
+        },
+        "signal_type": {
+          "source": "item.title",
+          "rule": "raises/secures/closes maps to funding; launches/debuts/explicit market entry maps to launch.",
+          "on_missing": "skip"
+        },
+        "published_at": {
+          "source": "item.pubDate",
+          "rule": "Parse the feed timestamp with timezone and convert to UTC; never substitute fetch time.",
+          "on_missing": "skip"
+        },
+        "description": {
+          "source": "none",
+          "rule": "Leave empty because no explicit permission to reproduce or transform the publisher description has been verified.",
+          "on_missing": "empty"
+        },
+        "region": {
+          "source": "none",
+          "rule": "Publisher scope or a location descriptor in the headline does not prove company region.",
+          "on_missing": "empty"
+        },
+        "categories": {
+          "source": "none",
+          "rule": "Publisher categories are not a reviewed stable product taxonomy.",
+          "on_missing": "empty"
+        },
+        "funding": {
+          "source": "item.title",
+          "rule": "Populate amount and currency only when explicit; populate round only for Series X or an explicit pre-seed/seed/growth round phrase; investors remain empty.",
+          "on_missing": "empty"
+        },
+        "raw_payload": {
+          "source": "none",
+          "rule": "Ignore author, encoded content, images and extension fields; store no raw XML and fetch no article page.",
+          "on_missing": "empty"
+        }
+      },
+      "fixture_expected": {
+        "startup_name": "SolaraGrid",
+        "canonical_url": "",
+        "source_url": "https://www.eu-startups.com/2026/07/solaragrid-launches-energy-forecasting-platform/",
+        "signal_type": "launch",
+        "published_at": "2026-07-09T11:00:00Z",
+        "description": "",
+        "region": "",
+        "categories": [],
+        "funding": {
+          "round": "",
+          "amount": "",
+          "currency": "",
+          "investors": []
+        },
+        "raw_payload": ""
+      },
+      "fallback_policy": {
+        "on_failure": "mark this source degraded and continue other sources",
+        "retry": "next scheduled cadence with bounded backoff",
+        "html_scraping": false,
+        "serve_stale_as_new": false
+      },
+      "fixture": "testdata/source_catalog/eu-startups.xml"
     }
   ]
 }

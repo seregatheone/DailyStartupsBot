@@ -56,7 +56,7 @@ Telegram E2E runner:
 
 ## Источники данных
 
-Утверждённые public feeds/API, field mapping, request limits, quality/deduplication, attribution и degradation policy зафиксированы в [`docs/source-catalog.md`](docs/source-catalog.md) и [`source_catalog.json`](backend/internal/ingestion/source_catalog.json). Dry-run использует только `sample-public`; явный `DAILY_STARTUPS_DRY_RUN=false` включает три GOV.UK Atom source и Show HN JSON API. Без `DAILY_STARTUPS_SOURCES_JSON` все четыре активны, а JSON служит только строгим activation overlay для их отключения. `/preview` не обращается к источникам и строится из уже сохранённых signals.
+Утверждённые public feeds/API, field mapping, request limits, quality/deduplication, attribution и degradation policy зафиксированы в [`docs/source-catalog.md`](docs/source-catalog.md) и [`source_catalog.json`](backend/internal/ingestion/source_catalog.json). Dry-run использует только `sample-public`; явный `DAILY_STARTUPS_DRY_RUN=false` включает три GOV.UK Atom source, Show HN JSON API, TechCrunch Startups RSS и EU-Startups RSS. Без `DAILY_STARTUPS_SOURCES_JSON` все шесть активны, а JSON служит только строгим activation overlay для их отключения. `/preview` не обращается к источникам и строится из уже сохранённых signals.
 
 ## Быстрый старт
 

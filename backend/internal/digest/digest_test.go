@@ -458,6 +458,53 @@ func TestRenderShowHNUsesSourceSpecificAttribution(t *testing.T) {
 	}
 }
 
+func TestRenderStartupNewsRSSUsesPublisherSpecificAttribution(t *testing.T) {
+	tests := []struct {
+		sourceID  string
+		sourceURL string
+		publisher string
+		termsURL  string
+		label     string
+	}{
+		{
+			sourceID: "techcrunch-startups", sourceURL: "https://techcrunch.com/2026/07/09/ledgerleap/",
+			publisher: "TechCrunch", termsURL: "https://techcrunch.com/rss-terms-of-use/", label: "TechCrunch RSS",
+		},
+		{
+			sourceID: "eu-startups", sourceURL: "https://www.eu-startups.com/2026/07/solaragrid/",
+			publisher: "EU-Startups", termsURL: "https://www.eu-startups.com/about/", label: "EU-Startups RSS",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.sourceID, func(t *testing.T) {
+			generated := (Generator{}).RenderMessages(Digest{
+				Date: "2026-07-10", Timezone: "UTC", Items: []Item{{
+					StartupName: test.publisher,
+					Sources:     []SourceAttribution{{SourceID: test.sourceID, SourceURL: test.sourceURL}},
+				}},
+			})[0].Text
+			restored := (Generator{}).StoredDeliveryMessages(
+				storage.DigestRun{DigestDate: "2026-07-10", Timezone: "UTC"},
+				[]storage.DigestItem{{
+					StartupName: test.publisher, Rank: 1,
+					SourceURLs: []string{test.sourceURL},
+					SourceAttributions: []storage.SourceAttribution{{
+						SourceID: test.sourceID, SourceURL: test.sourceURL,
+					}},
+				}},
+			)[0].Text
+
+			for _, text := range []string{generated, restored} {
+				if !strings.Contains(text, fmt.Sprintf(`<a href="%s">%s</a>`, test.sourceURL, test.publisher)) ||
+					!strings.Contains(text, fmt.Sprintf(`href="%s">%s</a> · headline metadata`, test.termsURL, test.label)) ||
+					strings.Contains(text, "OGL v3.0") || strings.Contains(text, "HN API") {
+					t.Fatalf("startup-news RSS attribution is incorrect:\n%s", text)
+				}
+			}
+		})
+	}
+}
+
 func TestStoredDeliveryMessagesPreservesApprovedAttribution(t *testing.T) {
 	messages := (Generator{}).StoredDeliveryMessages(
 		storage.DigestRun{DigestDate: "2026-07-10", Timezone: "UTC"},
