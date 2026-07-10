@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +42,7 @@ func TestSubscriptionPreferencesAndPreviewWorkflow(t *testing.T) {
 	var initialStatus v1.SubscriberStatusResponse
 	decodeResponse(t, response, &initialStatus)
 	if initialStatus.Subscriber.Active ||
-		initialStatus.Preferences.MaxItems == 0 ||
+		initialStatus.Preferences.MaxItems != 10 ||
 		initialStatus.Preferences.Regions == nil ||
 		initialStatus.Preferences.Categories == nil {
 		t.Fatalf("unexpected initial status: %#v", initialStatus)
@@ -104,6 +105,62 @@ func TestSubscriptionPreferencesAndPreviewWorkflow(t *testing.T) {
 	if subscribed.Subscriber.Active {
 		t.Fatalf("subscriber should be inactive: %#v", subscribed.Subscriber)
 	}
+}
+
+func TestPreferencesEnforceItemLimit(t *testing.T) {
+	repository, err := storage.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "backend.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+
+	testServer := httptest.NewServer(NewServer(config.Default(), repository))
+	defer testServer.Close()
+	response := requestJSON(t, http.MethodPost, testServer.URL+"/v1/subscribers/subscribe", map[string]any{
+		"telegram_id": 42,
+	})
+	response.Body.Close()
+
+	assertMaxItems := func(want int) {
+		t.Helper()
+		response := requestJSON(t, http.MethodGet, testServer.URL+"/v1/subscribers/42/status", nil)
+		var status v1.SubscriberStatusResponse
+		decodeResponse(t, response, &status)
+		if status.Preferences.MaxItems != want {
+			t.Fatalf("expected max_items=%d, got %#v", want, status.Preferences)
+		}
+	}
+	assertMaxItems(10)
+
+	response = requestJSON(t, http.MethodPatch, testServer.URL+"/v1/subscribers/42/preferences", map[string]any{
+		"telegram_id": 42,
+		"max_items":   10,
+	})
+	response.Body.Close()
+	assertMaxItems(10)
+
+	for _, maxItems := range []int{0, 11} {
+		t.Run(fmt.Sprintf("reject %d", maxItems), func(t *testing.T) {
+			message := requestJSONError(
+				t,
+				http.MethodPatch,
+				testServer.URL+"/v1/subscribers/42/preferences",
+				map[string]any{"telegram_id": 42, "max_items": maxItems},
+				http.StatusBadRequest,
+			)
+			if message != "max_items должен быть в диапазоне от 1 до 10" {
+				t.Fatalf("unexpected validation error: %q", message)
+			}
+			assertMaxItems(10)
+		})
+	}
+
+	response = requestJSON(t, http.MethodPatch, testServer.URL+"/v1/subscribers/42/preferences", map[string]any{
+		"telegram_id": 42,
+		"max_items":   1,
+	})
+	response.Body.Close()
+	assertMaxItems(1)
 }
 
 func TestSubscribeFailureLeavesNoPartialActiveSubscriber(t *testing.T) {

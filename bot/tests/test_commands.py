@@ -26,7 +26,7 @@ class FakeBackend:
                 "categories": ["AI"],
                 "delivery_time": "09:00",
                 "timezone": "Europe/Moscow",
-                "max_items": 5,
+                "max_items": 10,
             },
         }
 
@@ -95,6 +95,7 @@ class CommandsTest(unittest.TestCase):
         )
         self.assertNotIn("/preferences", self.telegram.sent[0][1])
         self.assertIn("/preferences", self.telegram.sent[1][1])
+        self.assertIn("max=7", self.telegram.sent[1][1])
 
     def test_subscription_commands_delegate_to_backend(self) -> None:
         self.router.handle_update(update("/subscribe"))
@@ -112,6 +113,7 @@ class CommandsTest(unittest.TestCase):
         self.router.handle_update(update("/preview"))
 
         self.assertIn("Подписка: активна", self.telegram.sent[0][1])
+        self.assertIn("Максимум элементов: 10", self.telegram.sent[0][1])
         self.assertIn("Acme AI", self.telegram.sent[1][1])
 
     def test_preferences_delegate_valid_payload(self) -> None:
@@ -125,6 +127,17 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(preferences["regions"], ["EU"])
         self.assertEqual(preferences["max_items"], 5)
         self.assertEqual(self.telegram.sent[0][1], "Настройки обновлены.")
+
+    def test_preferences_reject_max_above_ten_without_backend_call(self) -> None:
+        self.router.handle_update(update("/preferences max=11"))
+
+        self.assertEqual(self.backend.calls, [])
+        self.assertIn(
+            "Количество элементов должно быть от 1 до 10",
+            self.telegram.sent[0][1],
+        )
+        self.assertIn("Пример: /preferences", self.telegram.sent[0][1])
+        self.assertIn("max=7", self.telegram.sent[0][1])
 
     def test_unknown_command_uses_russian_help(self) -> None:
         self.router.handle_update(update("/unknown"))

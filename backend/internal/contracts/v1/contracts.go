@@ -40,7 +40,7 @@ type PreferencesPatchRequest struct {
 	Categories    []string `json:"categories,omitempty"`
 	DeliveryTime  string   `json:"delivery_time,omitempty"`
 	Timezone      string   `json:"timezone,omitempty"`
-	MaxItems      int      `json:"max_items,omitempty"`
+	MaxItems      *int     `json:"max_items,omitempty"`
 	ReplaceFields []string `json:"replace_fields,omitempty"`
 }
 

@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	DefaultItemLimit     = 5
+	MaximumItemLimit     = storage.MaximumDigestItems
+	DefaultItemLimit     = MaximumItemLimit
 	DefaultMessageLength = 4096
 )
 

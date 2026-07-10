@@ -10,6 +10,7 @@ class PreferenceParseError(ValueError):
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,39}$")
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_MAX_ITEMS = 10
 PREFERENCES_EXAMPLE = (
     "/preferences regions=EU categories=AI time=09:00 "
     "timezone=Europe/Moscow max=7"
@@ -49,8 +50,10 @@ def parse_preferences(text: str) -> dict[str, object]:
                 max_items = int(value)
             except ValueError as exc:
                 raise _preference_error("Количество элементов должно быть целым числом") from exc
-            if max_items < 1 or max_items > 20:
-                raise _preference_error("Количество элементов должно быть от 1 до 20")
+            if max_items < 1 or max_items > _MAX_ITEMS:
+                raise _preference_error(
+                    f"Количество элементов должно быть от 1 до {_MAX_ITEMS}"
+                )
             parsed["max_items"] = max_items
             replace_fields.append("max_items")
         else:
