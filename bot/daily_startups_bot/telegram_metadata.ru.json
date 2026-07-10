@@ -1,0 +1,15 @@
+{
+  "language_code": "ru",
+  "name": "Стартапы дня",
+  "short_description": "Краткий ежедневный дайджест стартапов.",
+  "description": "Ежедневно присылает до десяти стартапов. Подпишитесь, настройте интересующие регионы и категории, время и часовой пояс доставки.",
+  "commands": [
+    {"command": "start", "description": "Кратко рассказать о боте"},
+    {"command": "help", "description": "Показать список команд"},
+    {"command": "subscribe", "description": "Подписаться на ежедневный дайджест"},
+    {"command": "unsubscribe", "description": "Отключить ежедневную доставку"},
+    {"command": "status", "description": "Показать подписку и настройки"},
+    {"command": "preview", "description": "Показать предварительный дайджест"},
+    {"command": "preferences", "description": "Изменить настройки дайджеста"}
+  ]
+}

@@ -131,7 +131,7 @@ BACKEND_UNAVAILABLE_TEXT = (
     "Сервис стартапов временно недоступен. Пожалуйста, повторите попытку через минуту."
 )
 
-_LOGGABLE_COMMANDS = {
+PUBLIC_COMMANDS = (
     "/start",
     "/help",
     "/subscribe",
@@ -139,6 +139,10 @@ _LOGGABLE_COMMANDS = {
     "/status",
     "/preview",
     "/preferences",
+)
+
+_LOGGABLE_COMMANDS = {
+    *PUBLIC_COMMANDS,
     "/prefs",
 }
 
