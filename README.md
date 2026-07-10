@@ -56,7 +56,7 @@ Telegram E2E runner:
 
 ## Источники данных
 
-Утверждённые public feeds, field mapping, request limits, attribution и degradation policy зафиксированы в [`docs/source-catalog.md`](docs/source-catalog.md) и [`source_catalog.json`](backend/internal/ingestion/source_catalog.json). Безопасный generic RSS/Atom adapter уже реализован, но реальные источники пока не включены в `DefaultRegistry`: до runtime wiring #43 live default остаётся `sample-public`.
+Утверждённые public feeds, field mapping, request limits, attribution и degradation policy зафиксированы в [`docs/source-catalog.md`](docs/source-catalog.md) и [`source_catalog.json`](backend/internal/ingestion/source_catalog.json). Dry-run использует только `sample-public`; явный `DAILY_STARTUPS_DRY_RUN=false` включает три catalog-backed Atom source. Без `DAILY_STARTUPS_SOURCES_JSON` все три активны, а JSON служит только строгим activation overlay для их отключения. `/preview` не обращается к feeds и строится из уже сохранённых signals.
 
 ## Быстрый старт
 

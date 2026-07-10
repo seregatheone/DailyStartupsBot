@@ -8,6 +8,7 @@ import (
 	"time"
 
 	v1 "github.com/seregatheone/DailyStartupsBot/backend/internal/contracts/v1"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/ingestion"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
 
@@ -32,9 +33,15 @@ func (generator Generator) StoredDeliveryMessages(run storage.DigestRun, storedI
 
 	digestItems := make([]Item, 0, len(items))
 	for _, stored := range items {
-		sources := make([]SourceAttribution, 0, len(stored.SourceURLs))
-		for _, sourceURL := range stored.SourceURLs {
-			sources = append(sources, SourceAttribution{SourceID: sourceURL, SourceURL: sourceURL})
+		sources := make([]SourceAttribution, 0, len(stored.SourceAttributions))
+		for _, source := range stored.SourceAttributions {
+			sources = append(sources, SourceAttribution{SourceID: source.SourceID, SourceURL: source.SourceURL})
+		}
+		if len(sources) == 0 {
+			sources = make([]SourceAttribution, 0, len(stored.SourceURLs))
+			for _, sourceURL := range stored.SourceURLs {
+				sources = append(sources, SourceAttribution{SourceID: sourceURL, SourceURL: sourceURL})
+			}
 		}
 		digestItems = append(digestItems, Item{
 			StartupName: stored.StartupName,
@@ -255,12 +262,24 @@ func renderAttribution(sources []SourceAttribution) string {
 	}
 	var parts []string
 	for _, source := range sources {
-		label := html.EscapeString(source.SourceID)
+		label := source.SourceID
+		approved, isApproved := ingestion.ApprovedSourceAttribution(source.SourceID)
+		if isApproved {
+			label = approved.DisplayName
+		}
+		label = html.EscapeString(label)
 		if source.SourceURL == "" {
 			parts = append(parts, label)
-			continue
+		} else {
+			parts = append(parts, fmt.Sprintf(`<a href="%s">%s</a>`, html.EscapeString(source.SourceURL), label))
 		}
-		parts = append(parts, fmt.Sprintf(`<a href="%s">%s</a>`, html.EscapeString(source.SourceURL), label))
+		if isApproved {
+			parts = append(parts, fmt.Sprintf(
+				`<a href="%s">OGL v3.0</a> · %s`,
+				html.EscapeString(approved.TermsURL),
+				html.EscapeString(approved.Notice),
+			))
+		}
 	}
 	return "🔗 Источники: " + strings.Join(parts, ", ")
 }

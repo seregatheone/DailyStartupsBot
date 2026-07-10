@@ -25,10 +25,16 @@ func TestSQLiteRepositoryPersistsStateAcrossReinitialization(t *testing.T) {
 
 	subscriber := Subscriber{TelegramID: 42, Username: "founder", Active: true, CreatedAt: now}
 	preferences := Preferences{TelegramID: 42, Regions: []string{"EU"}, Categories: []string{"AI"}, DeliveryTime: "09:00", Timezone: "Europe/Moscow", MaxItems: 7}
-	health := SourceHealth{SourceID: "sample-public", Status: "ok", LastIngestionAt: now}
+	health := SourceHealth{SourceID: "sample-public", Status: "ok", LastIngestionAt: now, LastAttemptAt: now}
 	signal := StartupSignal{ID: "signal-1", StartupName: "Acme AI", CanonicalURL: "https://acme.example", SourceID: "sample-public", SourceURL: "https://source.example/acme", SignalType: "launch", PublishedAt: now, Description: "Builds useful tools", Region: "EU", RawPayload: "{}"}
 	digest := DigestRun{ID: "digest-1", DigestDate: "2026-07-09", Timezone: "Europe/Moscow", CreatedAt: now}
-	item := DigestItem{ID: "item-1", DigestID: digest.ID, StartupName: "Acme AI", Summary: "Acme AI launched.", Rank: 1, SourceURLs: []string{"https://source.example/acme"}}
+	item := DigestItem{
+		ID: "item-1", DigestID: digest.ID, StartupName: "Acme AI", Summary: "Acme AI launched.", Rank: 1,
+		SourceURLs: []string{"https://source.example/acme"},
+		SourceAttributions: []SourceAttribution{{
+			SourceID: "innovate-uk", SourceURL: "https://source.example/acme",
+		}},
+	}
 	delivery := Delivery{ID: "delivery-1", TelegramID: subscriber.TelegramID, DigestID: digest.ID, DigestDate: digest.DigestDate, Status: "due", Attempt: 0, CreatedAt: now}
 	attempt := DeliveryAttempt{ID: "attempt-1", DeliveryID: delivery.ID, AttemptedAt: now.Add(time.Minute), Status: "success", TelegramMessageID: "100"}
 
@@ -391,6 +397,52 @@ CREATE TABLE delivery_queue (
 	if status != "retry" || attempt != 2 || confirmedThrough != 1 || sequence != 0 {
 		t.Fatalf("migration changed legacy state: status=%s attempt=%d cursor=%d sequence=%d", status, attempt, confirmedThrough, sequence)
 	}
+}
+
+func TestSQLiteRepositoryMigratesAndPreservesSourceAttemptCadence(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "old-source-health.db")
+	db, err := sql.Open("sqlite", dbPath)
+	must(t, err)
+	_, err = db.ExecContext(ctx, `
+CREATE TABLE source_health (
+	source_id TEXT PRIMARY KEY,
+	status TEXT NOT NULL,
+	last_ingestion_at TEXT NOT NULL,
+	last_error TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO source_health (source_id, status, last_ingestion_at, last_error)
+VALUES ('innovate-uk', 'ok', '2026-07-10T08:00:00Z', '')
+`)
+	must(t, err)
+	must(t, db.Close())
+
+	repo, err := OpenSQLite(ctx, dbPath)
+	must(t, err)
+	health, err := repo.GetSourceHealth(ctx, "innovate-uk")
+	must(t, err)
+	wantAttempt := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	if !health.LastAttemptAt.Equal(wantAttempt) {
+		t.Fatalf("legacy attempt was not backfilled: %#v", health)
+	}
+	must(t, repo.SaveSourceHealth(ctx, SourceHealth{
+		SourceID: "innovate-uk", Status: "skipped",
+		LastIngestionAt: wantAttempt.Add(time.Minute), LastError: "source is disabled",
+	}))
+	health, err = repo.GetSourceHealth(ctx, "innovate-uk")
+	must(t, err)
+	if health.Status != "skipped" || !health.LastAttemptAt.Equal(wantAttempt) {
+		t.Fatalf("skipped health lost cadence state: %#v", health)
+	}
+	must(t, repo.Close())
+
+	repo, err = OpenSQLite(ctx, dbPath)
+	must(t, err)
+	must(t, repo.Close())
+	db, err = sql.Open("sqlite", dbPath)
+	must(t, err)
+	defer db.Close()
+	assertSQLiteColumnCount(t, db, "source_health", "last_attempt_at", 1)
 }
 
 func TestListDueDeliveriesFiltersAndOrdersEligibleRows(t *testing.T) {
@@ -850,6 +902,25 @@ func TestGetHealthSnapshotIsBoundedAndSanitized(t *testing.T) {
 	}
 	if snapshot.RecentFailures[0].Message != "delivery is awaiting retry" {
 		t.Fatalf("expected generic failure message, got %#v", snapshot.RecentFailures[0])
+	}
+}
+
+func TestSkippedSourceHealthIsNotDegradedOrReportedAsFailure(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	must(t, repo.SaveSourceHealth(ctx, SourceHealth{
+		SourceID: "innovate-uk", Status: "failed", LastIngestionAt: now, LastError: "stale failure",
+	}))
+	must(t, repo.SaveSourceHealth(ctx, SourceHealth{
+		SourceID: "innovate-uk", Status: "skipped", LastIngestionAt: now.Add(time.Minute), LastError: "source is disabled",
+	}))
+
+	snapshot, err := repo.GetHealthSnapshot(ctx, 10)
+	must(t, err)
+	if snapshot.Degraded || len(snapshot.RecentFailures) != 0 || len(snapshot.Sources) != 1 ||
+		snapshot.Sources[0].SourceID != "innovate-uk" || snapshot.Sources[0].Status != "skipped" {
+		t.Fatalf("skipped source degraded health: %#v", snapshot)
 	}
 }
 

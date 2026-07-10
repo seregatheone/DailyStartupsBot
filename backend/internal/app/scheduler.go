@@ -52,10 +52,25 @@ func NewScheduledPipeline(
 	repository scheduledRepository,
 	logger *slog.Logger,
 ) *ScheduledPipeline {
+	registry, sources, err := ingestion.AssembleRuntime(cfg.DryRun, cfg.Sources)
+	if err != nil {
+		registry = ingestion.NewRegistry()
+	} else {
+		cfg.Sources = sources
+	}
+	return NewScheduledPipelineWithRegistry(cfg, repository, logger, registry)
+}
+
+func NewScheduledPipelineWithRegistry(
+	cfg config.Config,
+	repository scheduledRepository,
+	logger *slog.Logger,
+	registry ingestion.Registry,
+) *ScheduledPipeline {
 	return &ScheduledPipeline{
 		config:     cfg,
 		repository: repository,
-		ingestor:   ingestion.NewService(ingestion.DefaultRegistry(), repository),
+		ingestor:   ingestion.NewService(registry, repository),
 		generator:  digest.Generator{},
 		logger:     logger,
 		now:        func() time.Time { return time.Now().UTC() },
@@ -376,6 +391,7 @@ func scheduledDigestSnapshot(
 	items := make([]storage.DigestItem, 0, len(generated.Items))
 	for index, generatedItem := range generated.Items {
 		sourceURLs := make([]string, 0, len(generatedItem.Sources))
+		sourceAttributions := make([]storage.SourceAttribution, 0, len(generatedItem.Sources))
 		for _, source := range generatedItem.Sources {
 			value := source.SourceURL
 			if value == "" {
@@ -384,14 +400,21 @@ func scheduledDigestSnapshot(
 			if value != "" {
 				sourceURLs = append(sourceURLs, value)
 			}
+			if source.SourceID != "" || source.SourceURL != "" {
+				sourceAttributions = append(sourceAttributions, storage.SourceAttribution{
+					SourceID:  source.SourceID,
+					SourceURL: source.SourceURL,
+				})
+			}
 		}
 		items = append(items, storage.DigestItem{
-			ID:          stableScheduledID("item", fmt.Sprintf("%s:%d", digestID, index+1)),
-			DigestID:    digestID,
-			StartupName: generatedItem.StartupName,
-			Summary:     generatedItem.Description,
-			Rank:        index + 1,
-			SourceURLs:  sourceURLs,
+			ID:                 stableScheduledID("item", fmt.Sprintf("%s:%d", digestID, index+1)),
+			DigestID:           digestID,
+			StartupName:        generatedItem.StartupName,
+			Summary:            generatedItem.Description,
+			Rank:               index + 1,
+			SourceURLs:         sourceURLs,
+			SourceAttributions: sourceAttributions,
 		})
 	}
 	return run, items

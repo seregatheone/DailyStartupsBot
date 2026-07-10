@@ -48,6 +48,7 @@ type catalogSource struct {
 	RequestPolicy struct {
 		CadenceMinutes    int    `json:"cadence_minutes"`
 		TimeoutSeconds    int    `json:"timeout_seconds"`
+		MaxRedirects      int    `json:"max_redirects"`
 		MaxResponseBytes  int    `json:"max_response_bytes"`
 		MaxItems          int    `json:"max_items"`
 		RateLimit         string `json:"rate_limit"`
@@ -163,7 +164,7 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 				t.Fatal("publisher access or reuse evidence is incomplete")
 			}
 			policy := source.RequestPolicy
-			if policy.CadenceMinutes < 30 || policy.TimeoutSeconds < 1 || policy.TimeoutSeconds > 15 || policy.MaxResponseBytes < 1 || policy.MaxResponseBytes > 1<<20 || policy.MaxItems < 1 || policy.MaxItems > 100 || policy.RateLimit == "" || policy.RedirectPolicy == "" || !policy.UserAgentRequired {
+			if policy.CadenceMinutes < 30 || policy.TimeoutSeconds < 1 || policy.TimeoutSeconds > 15 || policy.MaxRedirects < 0 || policy.MaxRedirects > 3 || policy.MaxResponseBytes < 1 || policy.MaxResponseBytes > 1<<20 || policy.MaxItems < 1 || policy.MaxItems > 100 || policy.RateLimit == "" || policy.RedirectPolicy == "" || !policy.UserAgentRequired {
 				t.Fatalf("unsafe request policy: %#v", policy)
 			}
 			if source.ExpectedFreshnessHours < 1 || source.ExpectedFreshnessHours > 24*30 || source.AcceptedItemPolicy == "" {

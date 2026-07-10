@@ -27,13 +27,14 @@ func TestRunLiveBackendStopsCleanlyWhenContextIsCancelled(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.DryRun = false
+	cfg.Sources = nil
 	cfg.ListenAddress = address
 	cfg.DatabasePath = filepath.Join(t.TempDir(), "backend.db")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- runLiveBackend(ctx, cfg, discardLogger())
+		done <- runLiveBackendWithRegistry(ctx, cfg, discardLogger(), ingestion.NewRegistry())
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -69,10 +70,11 @@ func TestRunLiveBackendFailsWhenAddressIsAlreadyBound(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.DryRun = false
+	cfg.Sources = nil
 	cfg.ListenAddress = listener.Addr().String()
 	cfg.DatabasePath = filepath.Join(t.TempDir(), "backend.db")
 
-	err = runLiveBackend(context.Background(), cfg, discardLogger())
+	err = runLiveBackendWithRegistry(context.Background(), cfg, discardLogger(), ingestion.NewRegistry())
 	if err == nil || !strings.Contains(err.Error(), "listen on") {
 		t.Fatalf("expected listen failure, got %v", err)
 	}
@@ -88,10 +90,11 @@ func TestRunLiveBackendFailsBeforeListeningWhenStorageIsUnavailable(t *testing.T
 
 	cfg := config.Default()
 	cfg.DryRun = false
+	cfg.Sources = nil
 	cfg.ListenAddress = address
 	cfg.DatabasePath = t.TempDir()
 
-	err = runLiveBackend(context.Background(), cfg, discardLogger())
+	err = runLiveBackendWithRegistry(context.Background(), cfg, discardLogger(), ingestion.NewRegistry())
 	if err == nil || !strings.Contains(err.Error(), "open database") {
 		t.Fatalf("expected database failure, got %v", err)
 	}
@@ -119,12 +122,12 @@ func TestRunLiveBackendKeepsHTTPAvailableAfterSourceFailure(t *testing.T) {
 	cfg.Timezone = "UTC"
 	cfg.IngestionTime = "00:00"
 	cfg.Sources = []config.SourceConfig{{
-		ID: "missing-adapter", Active: true, AccessMethod: "api",
+		ID: "innovate-uk", Active: true, AccessMethod: "atom",
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- runLiveBackend(ctx, cfg, discardLogger())
+		done <- runLiveBackendWithRegistry(ctx, cfg, discardLogger(), ingestion.NewRegistry())
 	}()
 
 	client := http.Client{Timeout: 250 * time.Millisecond}
@@ -169,10 +172,38 @@ func TestRunLiveBackendKeepsHTTPAvailableAfterSourceFailure(t *testing.T) {
 		t.Fatalf("reopen storage: %v", err)
 	}
 	defer repository.Close()
-	health, err := repository.GetSourceHealth(context.Background(), "missing-adapter")
+	health, err := repository.GetSourceHealth(context.Background(), "innovate-uk")
 	if err != nil || health.Status != ingestion.StatusConfigError {
 		t.Fatalf("source health was not persisted: health=%#v err=%v", health, err)
 	}
+}
+
+func TestRunLiveBackendRejectsUnsupportedSourceBeforeStorageAndListener(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve address: %v", err)
+	}
+	address := probe.Addr().String()
+	probe.Close()
+
+	cfg := config.Default()
+	cfg.DryRun = false
+	cfg.ListenAddress = address
+	cfg.DatabasePath = t.TempDir()
+	cfg.Sources = []config.SourceConfig{{
+		ID: "unapproved-source", Active: true, AccessMethod: "atom",
+	}}
+
+	err = runLiveBackend(context.Background(), cfg, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "unsupported id") {
+		t.Fatalf("expected source validation failure, got %v", err)
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("backend opened listener before source validation: %v", err)
+	}
+	listener.Close()
 }
 
 func TestWaitForPipelineReturnsWhenWorkerStops(t *testing.T) {
