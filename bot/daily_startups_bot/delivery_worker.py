@@ -12,6 +12,10 @@ from daily_startups_bot.telegram import (
 )
 
 
+_TELEGRAM_API_FAILURE = "Telegram API rejected the delivery"
+_TELEGRAM_TRANSPORT_FAILURE = "Telegram delivery is unavailable"
+
+
 class DeliveryBackend(Protocol):
     def due_deliveries(self) -> dict[str, Any]:
         ...
@@ -43,8 +47,16 @@ class DeliveryWorker:
         telegram_id = int(delivery["telegram_id"])
         messages = delivery.get("messages") or []
         sent_count = 0
-        last_message_id = ""
         for message in messages:
+            sequence = _positive_sequence(message)
+            if sequence is None:
+                log_event(
+                    "delivery_message_invalid",
+                    delivery_id=delivery_id,
+                    reason="invalid_sequence",
+                )
+                return sent_count
+
             try:
                 response = self.telegram.send_message(
                     telegram_id,
@@ -59,8 +71,9 @@ class DeliveryWorker:
                     {
                         "attempted_at": self.now().isoformat(),
                         "status": status,
+                        "sequence": sequence,
                         "error_code": str(exc.error_code),
-                        "error_message": exc.description,
+                        "error_message": _TELEGRAM_API_FAILURE,
                     },
                 )
                 return sent_count
@@ -71,22 +84,32 @@ class DeliveryWorker:
                     {
                         "attempted_at": self.now().isoformat(),
                         "status": "failed",
-                        "error_message": str(exc),
+                        "sequence": sequence,
+                        "error_message": _TELEGRAM_TRANSPORT_FAILURE,
                     },
                 )
                 return sent_count
 
             sent_count += 1
             log_event("telegram_send_result", delivery_id=delivery_id, status="success")
-            last_message_id = str(response.get("result", {}).get("message_id", ""))
-
-        if messages:
             self.backend.report_delivery_attempt(
                 delivery_id,
                 {
                     "attempted_at": self.now().isoformat(),
                     "status": "success",
-                    "telegram_message_id": last_message_id,
+                    "sequence": sequence,
+                    "telegram_message_id": str(
+                        response.get("result", {}).get("message_id", "")
+                    ),
                 },
             )
         return sent_count
+
+
+def _positive_sequence(message: object) -> int | None:
+    if not isinstance(message, dict):
+        return None
+    sequence = message.get("sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+        return None
+    return sequence

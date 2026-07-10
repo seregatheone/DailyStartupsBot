@@ -284,21 +284,28 @@ func (server *Server) dueDeliveries(writer http.ResponseWriter, request *http.Re
 
 	response := v1.DueDeliveriesResponse{Deliveries: make([]v1.Delivery, 0, len(queued))}
 	for _, queuedDelivery := range queued {
-		run, items, err := server.store.GetDigestRun(request.Context(), queuedDelivery.DigestID)
+		messages, totalMessages, err := server.deliveryMessages(request.Context(), queuedDelivery)
 		if err != nil {
 			writeInternalError(writer, err)
 			return
 		}
-		messages := (digest.Generator{}).StoredDeliveryMessages(run, items)
-		if messages == nil {
-			messages = []v1.DigestMessage{}
+		pending := make([]v1.DigestMessage, 0, totalMessages-queuedDelivery.ConfirmedThrough)
+		for _, message := range messages {
+			if message.Sequence > queuedDelivery.ConfirmedThrough {
+				pending = append(pending, message)
+			}
+		}
+		if len(pending) == 0 {
+			writeInternalError(writer, fmt.Errorf("delivery %s has no pending messages", queuedDelivery.ID))
+			return
 		}
 		response.Deliveries = append(response.Deliveries, v1.Delivery{
-			ID:         queuedDelivery.ID,
-			TelegramID: queuedDelivery.TelegramID,
-			DigestDate: queuedDelivery.DigestDate,
-			Messages:   messages,
-			Attempt:    queuedDelivery.Attempt,
+			ID:               queuedDelivery.ID,
+			TelegramID:       queuedDelivery.TelegramID,
+			DigestDate:       queuedDelivery.DigestDate,
+			Messages:         pending,
+			Attempt:          queuedDelivery.Attempt,
+			ConfirmedThrough: queuedDelivery.ConfirmedThrough,
 		})
 	}
 
@@ -325,6 +332,10 @@ func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.
 		writeError(writer, http.StatusBadRequest, "Поле attempted_at обязательно")
 		return
 	}
+	if body.Sequence != nil && *body.Sequence <= 0 {
+		writeError(writer, http.StatusBadRequest, "sequence должна быть положительным числом")
+		return
+	}
 	switch body.Status {
 	case "success", "failed", "blocked":
 	default:
@@ -341,28 +352,50 @@ func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.
 		writeInternalError(writer, err)
 		return
 	}
-
+	_, totalMessages, err := server.deliveryMessages(request.Context(), current)
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
 	attemptedAt := body.AttemptedAt.UTC()
+	sequence := 0
+	if body.Sequence != nil {
+		sequence = *body.Sequence
+	}
 	attempt := storage.DeliveryAttempt{
 		ID:                deliveryAttemptID(deliveryID, attemptedAt, body),
 		DeliveryID:        deliveryID,
 		AttemptedAt:       attemptedAt,
 		Status:            body.Status,
+		Sequence:          sequence,
 		TelegramMessageID: body.TelegramMessageID,
 		ErrorCode:         body.ErrorCode,
 		ErrorMessage:      body.ErrorMessage,
 	}
-	decision := deliverydomain.DecideRetry(body.Status, current.Attempt, attemptedAt, deliverydomain.RetryPolicy{
-		MaxAttempts: 3,
-		Delay:       15 * time.Minute,
-	})
-	updated, duplicate, err := server.store.RecordDeliveryAttempt(request.Context(), attempt, storage.DeliveryTransition{
-		ExpectedAttempt:      current.Attempt,
-		Status:               decision.Status,
-		Attempt:              decision.Attempt,
-		NextAttemptAt:        decision.NextAttemptAt,
-		DeactivateSubscriber: decision.Inactive,
-	})
+	transition := storage.DeliveryTransition{
+		ExpectedAttempt:          current.Attempt,
+		ExpectedConfirmedThrough: current.ConfirmedThrough,
+		TotalMessages:            totalMessages,
+		ConfirmedThrough:         current.ConfirmedThrough,
+	}
+	if body.Status == "success" && body.Sequence != nil && sequence < totalMessages {
+		transition.Status = "due"
+		transition.Attempt = current.Attempt
+		transition.ConfirmedThrough = sequence
+	} else {
+		decision := deliverydomain.DecideRetry(body.Status, current.Attempt, attemptedAt, deliverydomain.RetryPolicy{
+			MaxAttempts: 3,
+			Delay:       15 * time.Minute,
+		})
+		transition.Status = decision.Status
+		transition.Attempt = decision.Attempt
+		transition.NextAttemptAt = decision.NextAttemptAt
+		transition.DeactivateSubscriber = decision.Inactive
+		if body.Status == "success" {
+			transition.ConfirmedThrough = totalMessages
+		}
+	}
+	updated, duplicate, err := server.store.RecordDeliveryAttempt(request.Context(), attempt, transition)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(writer, http.StatusNotFound, "Доставка не найдена")
 		return
@@ -377,11 +410,12 @@ func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.
 	}
 
 	response := v1.DeliveryAttemptResponse{
-		DeliveryID: deliveryID,
-		AttemptID:  attempt.ID,
-		Status:     updated.Status,
-		Attempt:    updated.Attempt,
-		Duplicate:  duplicate,
+		DeliveryID:       deliveryID,
+		AttemptID:        attempt.ID,
+		Status:           updated.Status,
+		Attempt:          updated.Attempt,
+		ConfirmedThrough: updated.ConfirmedThrough,
+		Duplicate:        duplicate,
 	}
 	if !updated.NextAttemptAt.IsZero() {
 		nextAttemptAt := updated.NextAttemptAt.UTC()
@@ -391,6 +425,28 @@ func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.
 }
 
 func deliveryAttemptID(deliveryID string, attemptedAt time.Time, request v1.DeliveryAttemptRequest) string {
+	if request.Sequence != nil {
+		canonical, _ := json.Marshal(struct {
+			DeliveryID        string `json:"delivery_id"`
+			AttemptedAt       string `json:"attempted_at"`
+			Status            string `json:"status"`
+			Sequence          int    `json:"sequence"`
+			TelegramMessageID string `json:"telegram_message_id"`
+			ErrorCode         string `json:"error_code"`
+			ErrorMessage      string `json:"error_message"`
+		}{
+			DeliveryID:        deliveryID,
+			AttemptedAt:       attemptedAt.UTC().Format(time.RFC3339Nano),
+			Status:            request.Status,
+			Sequence:          *request.Sequence,
+			TelegramMessageID: request.TelegramMessageID,
+			ErrorCode:         request.ErrorCode,
+			ErrorMessage:      request.ErrorMessage,
+		})
+		hash := sha256.Sum256(canonical)
+		return fmt.Sprintf("attempt-%x", hash[:])
+	}
+
 	canonical, _ := json.Marshal(struct {
 		DeliveryID        string `json:"delivery_id"`
 		AttemptedAt       string `json:"attempted_at"`
@@ -408,6 +464,26 @@ func deliveryAttemptID(deliveryID string, attemptedAt time.Time, request v1.Deli
 	})
 	hash := sha256.Sum256(canonical)
 	return fmt.Sprintf("attempt-%x", hash[:])
+}
+
+func (server *Server) deliveryMessages(ctx context.Context, queued storage.Delivery) ([]v1.DigestMessage, int, error) {
+	run, items, err := server.store.GetDigestRun(ctx, queued.DigestID)
+	if err != nil {
+		return nil, 0, err
+	}
+	messages := (digest.Generator{}).StoredDeliveryMessages(run, items)
+	if len(messages) == 0 {
+		return nil, 0, fmt.Errorf("delivery %s rendered no messages", queued.ID)
+	}
+	for index, message := range messages {
+		if message.Sequence != index+1 {
+			return nil, 0, fmt.Errorf("delivery %s has invalid message sequence", queued.ID)
+		}
+	}
+	if queued.ConfirmedThrough < 0 || queued.ConfirmedThrough > len(messages) {
+		return nil, 0, fmt.Errorf("delivery %s has invalid confirmed cursor", queued.ID)
+	}
+	return messages, len(messages), nil
 }
 
 func (server *Server) subscriberState(

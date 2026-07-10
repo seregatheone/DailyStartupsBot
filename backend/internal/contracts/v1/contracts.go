@@ -66,29 +66,32 @@ type DueDeliveriesResponse struct {
 }
 
 type Delivery struct {
-	ID         string          `json:"id"`
-	TelegramID int64           `json:"telegram_id"`
-	DigestDate string          `json:"digest_date"`
-	Messages   []DigestMessage `json:"messages"`
-	Attempt    int             `json:"attempt"`
+	ID               string          `json:"id"`
+	TelegramID       int64           `json:"telegram_id"`
+	DigestDate       string          `json:"digest_date"`
+	Messages         []DigestMessage `json:"messages"`
+	Attempt          int             `json:"attempt"`
+	ConfirmedThrough int             `json:"confirmed_through"`
 }
 
 type DeliveryAttemptRequest struct {
 	DeliveryID        string    `json:"delivery_id"`
 	AttemptedAt       time.Time `json:"attempted_at"`
 	Status            string    `json:"status"`
+	Sequence          *int      `json:"sequence,omitempty"`
 	TelegramMessageID string    `json:"telegram_message_id,omitempty"`
 	ErrorCode         string    `json:"error_code,omitempty"`
 	ErrorMessage      string    `json:"error_message,omitempty"`
 }
 
 type DeliveryAttemptResponse struct {
-	DeliveryID    string     `json:"delivery_id"`
-	AttemptID     string     `json:"attempt_id"`
-	Status        string     `json:"status"`
-	Attempt       int        `json:"attempt"`
-	Duplicate     bool       `json:"duplicate"`
-	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+	DeliveryID       string     `json:"delivery_id"`
+	AttemptID        string     `json:"attempt_id"`
+	Status           string     `json:"status"`
+	Attempt          int        `json:"attempt"`
+	ConfirmedThrough int        `json:"confirmed_through"`
+	Duplicate        bool       `json:"duplicate"`
+	NextAttemptAt    *time.Time `json:"next_attempt_at,omitempty"`
 }
 
 type IngestionRunRequest struct {

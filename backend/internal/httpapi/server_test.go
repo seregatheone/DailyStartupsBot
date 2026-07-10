@@ -325,6 +325,167 @@ func TestDeliveryRoutesAreIdempotentAndSuppressSuccessfulDelivery(t *testing.T) 
 	requestJSONStatus(t, http.MethodPost, testServer.URL+"/v1/deliveries/delivery-success/attempts", conflict, http.StatusConflict)
 }
 
+func TestDeliveryMessageProgressResumesAfterRestartWithoutRepeatingConfirmedPart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "resume.db")
+	now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
+	repository, err := storage.OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open initial repository: %v", err)
+	}
+	seedTwoMessageDelivery(t, repository, storage.Delivery{
+		ID: "delivery-resume", TelegramID: 42, DigestID: "digest-resume",
+		DigestDate: "2026-07-10", Status: "due", CreatedAt: now,
+	})
+	server := NewServer(config.Default(), repository)
+	server.now = func() time.Time { return now }
+	testServer := httptest.NewServer(server)
+
+	response := requestJSON(t, http.MethodGet, testServer.URL+"/v1/deliveries/due", nil)
+	var due v1.DueDeliveriesResponse
+	decodeResponse(t, response, &due)
+	if len(due.Deliveries) != 1 || len(due.Deliveries[0].Messages) != 2 ||
+		due.Deliveries[0].Messages[0].Sequence != 1 || due.Deliveries[0].Messages[1].Sequence != 2 ||
+		due.Deliveries[0].ConfirmedThrough != 0 {
+		t.Fatalf("expected initial two-message delivery: %#v", due)
+	}
+
+	firstSuccess := map[string]any{
+		"delivery_id": "delivery-resume", "attempted_at": now.Format(time.RFC3339),
+		"status": "success", "sequence": 1, "telegram_message_id": "101",
+	}
+	response = requestJSON(t, http.MethodPost, testServer.URL+"/v1/deliveries/delivery-resume/attempts", firstSuccess)
+	var first v1.DeliveryAttemptResponse
+	decodeResponse(t, response, &first)
+	if first.Status != "due" || first.Attempt != 0 || first.ConfirmedThrough != 1 || first.Duplicate {
+		t.Fatalf("unexpected intermediate response: %#v", first)
+	}
+	response = requestJSON(t, http.MethodPost, testServer.URL+"/v1/deliveries/delivery-resume/attempts", firstSuccess)
+	var duplicate v1.DeliveryAttemptResponse
+	decodeResponse(t, response, &duplicate)
+	if !duplicate.Duplicate || duplicate.AttemptID != first.AttemptID || duplicate.ConfirmedThrough != 1 {
+		t.Fatalf("unexpected duplicate message response: %#v", duplicate)
+	}
+	requestJSONStatus(t, http.MethodPost, testServer.URL+"/v1/deliveries/delivery-resume/attempts", map[string]any{
+		"delivery_id": "delivery-resume", "attempted_at": now.Add(time.Second).Format(time.RFC3339),
+		"status": "success", "sequence": 1, "telegram_message_id": "duplicate-send",
+	}, http.StatusConflict)
+
+	testServer.Close()
+	if err := repository.Close(); err != nil {
+		t.Fatalf("close initial repository: %v", err)
+	}
+
+	reopened, err := storage.OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen repository: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	restarted := NewServer(config.Default(), reopened)
+	restarted.now = func() time.Time { return now }
+	restartedServer := httptest.NewServer(restarted)
+	t.Cleanup(restartedServer.Close)
+
+	response = requestJSON(t, http.MethodGet, restartedServer.URL+"/v1/deliveries/due", nil)
+	decodeResponse(t, response, &due)
+	if len(due.Deliveries) != 1 || due.Deliveries[0].ConfirmedThrough != 1 ||
+		len(due.Deliveries[0].Messages) != 1 || due.Deliveries[0].Messages[0].Sequence != 2 {
+		t.Fatalf("restart did not resume at sequence 2: %#v", due)
+	}
+
+	failedAt := now.Add(time.Minute)
+	response = requestJSON(t, http.MethodPost, restartedServer.URL+"/v1/deliveries/delivery-resume/attempts", map[string]any{
+		"delivery_id": "delivery-resume", "attempted_at": failedAt.Format(time.RFC3339),
+		"status": "failed", "sequence": 2, "error_code": "timeout",
+	})
+	var failed v1.DeliveryAttemptResponse
+	decodeResponse(t, response, &failed)
+	if failed.Status != "retry" || failed.Attempt != 1 || failed.ConfirmedThrough != 1 || failed.NextAttemptAt == nil {
+		t.Fatalf("failure changed confirmed progress: %#v", failed)
+	}
+	response = requestJSON(t, http.MethodGet, restartedServer.URL+"/v1/deliveries/due", nil)
+	decodeResponse(t, response, &due)
+	if len(due.Deliveries) != 0 {
+		t.Fatalf("retry became due before delay: %#v", due)
+	}
+
+	retryAt := failedAt.Add(15 * time.Minute)
+	restarted.now = func() time.Time { return retryAt }
+	response = requestJSON(t, http.MethodGet, restartedServer.URL+"/v1/deliveries/due", nil)
+	decodeResponse(t, response, &due)
+	if len(due.Deliveries) != 1 || due.Deliveries[0].ConfirmedThrough != 1 ||
+		len(due.Deliveries[0].Messages) != 1 || due.Deliveries[0].Messages[0].Sequence != 2 {
+		t.Fatalf("retry did not preserve resume cursor: %#v", due)
+	}
+
+	response = requestJSON(t, http.MethodPost, restartedServer.URL+"/v1/deliveries/delivery-resume/attempts", map[string]any{
+		"delivery_id": "delivery-resume", "attempted_at": retryAt.Format(time.RFC3339),
+		"status": "success", "sequence": 2, "telegram_message_id": "102",
+	})
+	var completed v1.DeliveryAttemptResponse
+	decodeResponse(t, response, &completed)
+	if completed.Status != "sent" || completed.Attempt != 2 || completed.ConfirmedThrough != 2 {
+		t.Fatalf("final message did not complete delivery: %#v", completed)
+	}
+	response = requestJSON(t, http.MethodGet, restartedServer.URL+"/v1/deliveries/due", nil)
+	decodeResponse(t, response, &due)
+	if len(due.Deliveries) != 0 {
+		t.Fatalf("completed delivery remained due: %#v", due)
+	}
+}
+
+func TestDeliveryAttemptValidatesSequenceAndPreservesLegacyHash(t *testing.T) {
+	_, _, testServer, now := deliveryTestServer(t)
+	requestJSONStatus(t, http.MethodPost, testServer.URL+"/v1/deliveries/missing/attempts", map[string]any{
+		"delivery_id": "missing", "attempted_at": now.Format(time.RFC3339),
+		"status": "success", "sequence": 0,
+	}, http.StatusBadRequest)
+
+	legacy := v1.DeliveryAttemptRequest{
+		DeliveryID: "delivery", AttemptedAt: now, Status: "success", TelegramMessageID: "100",
+	}
+	const legacyID = "attempt-4c0046b57e66f4453921cd30543918276b11f11fba05236a484876eecd3c172e"
+	if got := deliveryAttemptID("delivery", now, legacy); got != legacyID {
+		t.Fatalf("legacy attempt hash changed: got %s want %s", got, legacyID)
+	}
+	sequence := 1
+	legacy.Sequence = &sequence
+	if got := deliveryAttemptID("delivery", now, legacy); got == legacyID {
+		t.Fatal("message sequence was not included in attempt hash")
+	}
+}
+
+func TestLegacyAggregateAttemptPreservesAndCompletesExistingProgress(t *testing.T) {
+	repository, server, testServer, now := deliveryTestServer(t)
+	seedTwoMessageDelivery(t, repository, storage.Delivery{
+		ID: "delivery-legacy-progress", TelegramID: 44, DigestID: "digest-legacy-progress",
+		DigestDate: "2026-07-11", Status: "due", ConfirmedThrough: 1, CreatedAt: now,
+	})
+
+	failedAt := now.Add(time.Minute)
+	response := requestJSON(t, http.MethodPost, testServer.URL+"/v1/deliveries/delivery-legacy-progress/attempts", map[string]any{
+		"delivery_id": "delivery-legacy-progress", "attempted_at": failedAt.Format(time.RFC3339),
+		"status": "failed", "error_code": "timeout",
+	})
+	var failed v1.DeliveryAttemptResponse
+	decodeResponse(t, response, &failed)
+	if failed.Status != "retry" || failed.Attempt != 1 || failed.ConfirmedThrough != 1 {
+		t.Fatalf("legacy failure changed existing cursor: %#v", failed)
+	}
+
+	retryAt := failedAt.Add(15 * time.Minute)
+	server.now = func() time.Time { return retryAt }
+	response = requestJSON(t, http.MethodPost, testServer.URL+"/v1/deliveries/delivery-legacy-progress/attempts", map[string]any{
+		"delivery_id": "delivery-legacy-progress", "attempted_at": retryAt.Format(time.RFC3339),
+		"status": "success", "telegram_message_id": "102",
+	})
+	var completed v1.DeliveryAttemptResponse
+	decodeResponse(t, response, &completed)
+	if completed.Status != "sent" || completed.Attempt != 2 || completed.ConfirmedThrough != 2 {
+		t.Fatalf("legacy success did not confirm all remaining messages: %#v", completed)
+	}
+}
+
 func TestDeliveryFailureRetryBlockedAndAttemptValidation(t *testing.T) {
 	repository, server, testServer, now := deliveryTestServer(t)
 	seedDelivery(t, repository, storage.Delivery{
@@ -586,6 +747,36 @@ func seedDelivery(t *testing.T, repository *storage.SQLiteRepository, queued sto
 		Active:     true,
 		CreatedAt:  queued.CreatedAt,
 	}, queued)
+}
+
+func seedTwoMessageDelivery(t *testing.T, repository *storage.SQLiteRepository, queued storage.Delivery) {
+	t.Helper()
+	ctx := context.Background()
+	operations := []struct {
+		action string
+		err    error
+	}{
+		{"subscriber", repository.SaveSubscriber(ctx, storage.Subscriber{
+			TelegramID: queued.TelegramID, Username: "subscriber", Active: true, CreatedAt: queued.CreatedAt,
+		})},
+		{"digest", repository.SaveDigestRun(ctx, storage.DigestRun{
+			ID: queued.DigestID, DigestDate: queued.DigestDate, Timezone: "UTC", CreatedAt: queued.CreatedAt,
+		})},
+		{"item 1", repository.SaveDigestItem(ctx, storage.DigestItem{
+			ID: "item-1-" + queued.ID, DigestID: queued.DigestID, StartupName: "Acme One",
+			Summary: strings.Repeat("Alpha ", 450), Rank: 1, SourceURLs: []string{"https://source.example/one"},
+		})},
+		{"item 2", repository.SaveDigestItem(ctx, storage.DigestItem{
+			ID: "item-2-" + queued.ID, DigestID: queued.DigestID, StartupName: "Acme Two",
+			Summary: strings.Repeat("Beta ", 500), Rank: 2, SourceURLs: []string{"https://source.example/two"},
+		})},
+		{"delivery", repository.SaveDelivery(ctx, queued)},
+	}
+	for _, operation := range operations {
+		if operation.err != nil {
+			t.Fatalf("save %s: %v", operation.action, operation.err)
+		}
+	}
 }
 
 func seedDeliveryForSubscriber(

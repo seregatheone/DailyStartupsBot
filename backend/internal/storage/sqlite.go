@@ -74,8 +74,19 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 			return fmt.Errorf("apply sqlite migration: %w", err)
 		}
 	}
-	if err := repo.ensureDeliveryNextAttemptColumn(ctx); err != nil {
-		return err
+	columns := []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{table: "delivery_queue", name: "next_attempt_at", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "delivery_queue", name: "confirmed_through", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "delivery_attempts", name: "sequence", definition: "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, column := range columns {
+		if err := repo.ensureColumn(ctx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	return repo.normalizePreferenceItemLimits(ctx)
 }
@@ -92,10 +103,10 @@ WHERE max_items < 1 OR max_items > ?
 	return nil
 }
 
-func (repo *SQLiteRepository) ensureDeliveryNextAttemptColumn(ctx context.Context) error {
-	rows, err := repo.db.QueryContext(ctx, `PRAGMA table_info(delivery_queue)`)
+func (repo *SQLiteRepository) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := repo.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
-		return fmt.Errorf("inspect delivery queue schema: %w", err)
+		return fmt.Errorf("inspect %s schema: %w", table, err)
 	}
 	defer rows.Close()
 
@@ -106,20 +117,21 @@ func (repo *SQLiteRepository) ensureDeliveryNextAttemptColumn(ctx context.Contex
 		var notNull, primaryKey int
 		var defaultValue sql.NullString
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return fmt.Errorf("inspect delivery queue column: %w", err)
+			return fmt.Errorf("inspect %s.%s column: %w", table, column, err)
 		}
-		if name == "next_attempt_at" {
+		if name == column {
 			found = true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("inspect delivery queue schema: %w", err)
+		return fmt.Errorf("inspect %s schema: %w", table, err)
 	}
 	if found {
 		return nil
 	}
-	if _, err := repo.db.ExecContext(ctx, `ALTER TABLE delivery_queue ADD COLUMN next_attempt_at TEXT NOT NULL DEFAULT ''`); err != nil {
-		return fmt.Errorf("add delivery retry time: %w", err)
+	statement := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition)
+	if _, err := repo.db.ExecContext(ctx, statement); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
 	}
 	return nil
 }
@@ -512,8 +524,8 @@ ORDER BY rank ASC
 
 func (repo *SQLiteRepository) SaveDelivery(ctx context.Context, delivery Delivery) error {
 	_, err := repo.db.ExecContext(ctx, `
-INSERT INTO delivery_queue (id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO delivery_queue (id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	telegram_id = excluded.telegram_id,
 	digest_id = excluded.digest_id,
@@ -521,7 +533,7 @@ ON CONFLICT(id) DO UPDATE SET
 	status = excluded.status,
 	attempt = excluded.attempt,
 	next_attempt_at = excluded.next_attempt_at
-`, delivery.ID, delivery.TelegramID, delivery.DigestID, delivery.DigestDate, delivery.Status, delivery.Attempt, formatTime(delivery.NextAttemptAt), formatTime(delivery.CreatedAt))
+	`, delivery.ID, delivery.TelegramID, delivery.DigestID, delivery.DigestDate, delivery.Status, delivery.Attempt, delivery.ConfirmedThrough, formatTime(delivery.NextAttemptAt), formatTime(delivery.CreatedAt))
 	return err
 }
 
@@ -537,7 +549,7 @@ WHERE telegram_id = ? AND digest_date = ?
 
 func (repo *SQLiteRepository) GetDelivery(ctx context.Context, id string) (Delivery, error) {
 	return getDelivery(repo.db.QueryRowContext(ctx, `
-SELECT id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at
+	SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at
 FROM delivery_queue
 WHERE id = ?
 `, id))
@@ -545,7 +557,7 @@ WHERE id = ?
 
 func (repo *SQLiteRepository) ListDueDeliveries(ctx context.Context, now time.Time) ([]Delivery, error) {
 	rows, err := repo.db.QueryContext(ctx, `
-SELECT d.id, d.telegram_id, d.digest_id, d.digest_date, d.status, d.attempt, d.next_attempt_at, d.created_at
+	SELECT d.id, d.telegram_id, d.digest_id, d.digest_date, d.status, d.attempt, d.confirmed_through, d.next_attempt_at, d.created_at
 FROM delivery_queue AS d
 JOIN subscribers AS s ON s.telegram_id = d.telegram_id
 WHERE s.active = 1
@@ -596,6 +608,7 @@ func getDelivery(row scanner) (Delivery, error) {
 		&delivery.DigestDate,
 		&delivery.Status,
 		&delivery.Attempt,
+		&delivery.ConfirmedThrough,
 		&nextAttemptAt,
 		&createdAt,
 	)
@@ -609,22 +622,23 @@ func getDelivery(row scanner) (Delivery, error) {
 
 func (repo *SQLiteRepository) SaveDeliveryAttempt(ctx context.Context, attempt DeliveryAttempt) error {
 	_, err := repo.db.ExecContext(ctx, `
-INSERT INTO delivery_attempts (id, delivery_id, attempted_at, status, telegram_message_id, error_code, error_message)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO delivery_attempts (id, delivery_id, attempted_at, status, sequence, telegram_message_id, error_code, error_message)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	delivery_id = excluded.delivery_id,
 	attempted_at = excluded.attempted_at,
-	status = excluded.status,
+		status = excluded.status,
+		sequence = excluded.sequence,
 	telegram_message_id = excluded.telegram_message_id,
 	error_code = excluded.error_code,
 	error_message = excluded.error_message
-`, attempt.ID, attempt.DeliveryID, formatTime(attempt.AttemptedAt), attempt.Status, attempt.TelegramMessageID, attempt.ErrorCode, attempt.ErrorMessage)
+	`, attempt.ID, attempt.DeliveryID, formatTime(attempt.AttemptedAt), attempt.Status, attempt.Sequence, attempt.TelegramMessageID, attempt.ErrorCode, attempt.ErrorMessage)
 	return err
 }
 
 func (repo *SQLiteRepository) ListDeliveryAttempts(ctx context.Context, deliveryID string) ([]DeliveryAttempt, error) {
 	rows, err := repo.db.QueryContext(ctx, `
-SELECT id, delivery_id, attempted_at, status, telegram_message_id, error_code, error_message
+	SELECT id, delivery_id, attempted_at, status, sequence, telegram_message_id, error_code, error_message
 FROM delivery_attempts
 WHERE delivery_id = ?
 ORDER BY attempted_at ASC
@@ -638,7 +652,7 @@ ORDER BY attempted_at ASC
 	for rows.Next() {
 		var attempt DeliveryAttempt
 		var attemptedAt string
-		if err := rows.Scan(&attempt.ID, &attempt.DeliveryID, &attemptedAt, &attempt.Status, &attempt.TelegramMessageID, &attempt.ErrorCode, &attempt.ErrorMessage); err != nil {
+		if err := rows.Scan(&attempt.ID, &attempt.DeliveryID, &attemptedAt, &attempt.Status, &attempt.Sequence, &attempt.TelegramMessageID, &attempt.ErrorCode, &attempt.ErrorMessage); err != nil {
 			return nil, err
 		}
 		attempt.AttemptedAt = parseStoredTime(attemptedAt)
@@ -670,8 +684,8 @@ WHERE id = ?
 			return Delivery{}, false, ErrDeliveryConflict
 		}
 		delivery, err := getDelivery(tx.QueryRowContext(ctx, `
-SELECT id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at
-FROM delivery_queue
+	SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at
+	FROM delivery_queue
 WHERE id = ?
 `, attempt.DeliveryID))
 		return delivery, true, err
@@ -680,7 +694,7 @@ WHERE id = ?
 	}
 
 	current, err := getDelivery(tx.QueryRowContext(ctx, `
-SELECT id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at
+	SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at
 FROM delivery_queue
 WHERE id = ?
 `, attempt.DeliveryID))
@@ -690,21 +704,23 @@ WHERE id = ?
 	if isTerminalDeliveryStatus(current.Status) {
 		return Delivery{}, false, ErrDeliveryTerminal
 	}
-	if current.Attempt != transition.ExpectedAttempt || transition.Attempt != transition.ExpectedAttempt+1 {
+	if current.Attempt != transition.ExpectedAttempt ||
+		current.ConfirmedThrough != transition.ExpectedConfirmedThrough ||
+		!validDeliveryTransition(current, attempt, transition) {
 		return Delivery{}, false, ErrDeliveryConflict
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO delivery_attempts (id, delivery_id, attempted_at, status, telegram_message_id, error_code, error_message)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`, attempt.ID, attempt.DeliveryID, formatTime(attempt.AttemptedAt), attempt.Status, attempt.TelegramMessageID, attempt.ErrorCode, attempt.ErrorMessage); err != nil {
+	INSERT INTO delivery_attempts (id, delivery_id, attempted_at, status, sequence, telegram_message_id, error_code, error_message)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, attempt.ID, attempt.DeliveryID, formatTime(attempt.AttemptedAt), attempt.Status, attempt.Sequence, attempt.TelegramMessageID, attempt.ErrorCode, attempt.ErrorMessage); err != nil {
 		return Delivery{}, false, err
 	}
 	result, err := tx.ExecContext(ctx, `
-UPDATE delivery_queue
-SET status = ?, attempt = ?, next_attempt_at = ?
-WHERE id = ? AND attempt = ? AND status NOT IN ('sent', 'failed', 'blocked')
-`, transition.Status, transition.Attempt, formatTime(transition.NextAttemptAt), attempt.DeliveryID, transition.ExpectedAttempt)
+	UPDATE delivery_queue
+	SET status = ?, attempt = ?, confirmed_through = ?, next_attempt_at = ?
+	WHERE id = ? AND attempt = ? AND confirmed_through = ? AND status NOT IN ('sent', 'failed', 'blocked')
+	`, transition.Status, transition.Attempt, transition.ConfirmedThrough, formatTime(transition.NextAttemptAt), attempt.DeliveryID, transition.ExpectedAttempt, transition.ExpectedConfirmedThrough)
 	if err != nil {
 		return Delivery{}, false, err
 	}
@@ -726,7 +742,7 @@ WHERE telegram_id = ?
 	}
 
 	updated, err := getDelivery(tx.QueryRowContext(ctx, `
-SELECT id, telegram_id, digest_id, digest_date, status, attempt, next_attempt_at, created_at
+	SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at
 FROM delivery_queue
 WHERE id = ?
 `, attempt.DeliveryID))
@@ -737,6 +753,54 @@ WHERE id = ?
 		return Delivery{}, false, err
 	}
 	return updated, false, nil
+}
+
+func validDeliveryTransition(current Delivery, attempt DeliveryAttempt, transition DeliveryTransition) bool {
+	if transition.TotalMessages <= 0 || current.ConfirmedThrough < 0 || current.ConfirmedThrough > transition.TotalMessages {
+		return false
+	}
+	if transition.ConfirmedThrough < current.ConfirmedThrough || transition.ConfirmedThrough > transition.TotalMessages {
+		return false
+	}
+	if attempt.Sequence < 0 || attempt.Sequence > transition.TotalMessages {
+		return false
+	}
+	if attempt.Sequence > 0 && attempt.Sequence != current.ConfirmedThrough+1 {
+		return false
+	}
+
+	switch attempt.Status {
+	case "success":
+		if transition.DeactivateSubscriber || !transition.NextAttemptAt.IsZero() {
+			return false
+		}
+		if attempt.Sequence == 0 {
+			return transition.ConfirmedThrough == transition.TotalMessages &&
+				transition.Status == "sent" && transition.Attempt == current.Attempt+1
+		}
+		if transition.ConfirmedThrough != attempt.Sequence {
+			return false
+		}
+		if attempt.Sequence == transition.TotalMessages {
+			return transition.Status == "sent" && transition.Attempt == current.Attempt+1
+		}
+		return transition.Status == "due" && transition.Attempt == current.Attempt
+	case "failed":
+		if transition.DeactivateSubscriber || transition.ConfirmedThrough != current.ConfirmedThrough || transition.Attempt != current.Attempt+1 {
+			return false
+		}
+		if transition.Status == "retry" {
+			return !transition.NextAttemptAt.IsZero()
+		}
+		return transition.Status == "failed" && transition.NextAttemptAt.IsZero()
+	case "blocked":
+		return transition.DeactivateSubscriber &&
+			transition.ConfirmedThrough == current.ConfirmedThrough &&
+			transition.Status == "blocked" && transition.Attempt == current.Attempt+1 &&
+			transition.NextAttemptAt.IsZero()
+	default:
+		return false
+	}
 }
 
 func isTerminalDeliveryStatus(status string) bool {
