@@ -3,6 +3,7 @@ package ingestion
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,7 +24,7 @@ func TestAssembleRuntimeUsesCatalogAsSingleLiveSourceOwner(t *testing.T) {
 		t.Fatalf("assemble live runtime: %v", err)
 	}
 	catalog := readTestCatalog(t)
-	if len(sources) != 3 || len(sources) != len(catalog.Sources) {
+	if len(sources) != len(catalog.Sources) {
 		t.Fatalf("unexpected live source count: %#v", sources)
 	}
 
@@ -39,8 +40,11 @@ func TestAssembleRuntimeUsesCatalogAsSingleLiveSourceOwner(t *testing.T) {
 			t.Fatalf("runtime source diverges from catalog: %#v", source)
 		}
 	}
+	if _, ok := wantByID[hackerNewsShowSourceID]; !ok {
+		t.Fatal("required productive Show HN source is missing from the live catalog")
+	}
 	registered, skipped := registry.Resolve(sources)
-	if len(registered) != 3 || len(skipped) != 0 {
+	if len(registered) != len(catalog.Sources) || len(skipped) != 0 {
 		t.Fatalf("approved adapters were not registered: registered=%#v skipped=%#v", registered, skipped)
 	}
 	for _, registeredSource := range registered {
@@ -119,7 +123,13 @@ func TestApprovedSourceAdaptersMapCatalogFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatalf("fetch fixture: %v", err)
 			}
-			if requests.Load() != 1 || result.Skipped != 0 || len(result.Records) != 1 {
+			wantRequests := int32(1)
+			wantSkipped := 0
+			if source.AccessMethod == "api" {
+				wantRequests = 4
+				wantSkipped = 2
+			}
+			if requests.Load() != wantRequests || result.Skipped != wantSkipped || len(result.Records) != 1 {
 				t.Fatalf("unexpected fixture result: requests=%d result=%#v", requests.Load(), result)
 			}
 			want := expectedSourceRecord(t, source.FixtureExpected)
@@ -160,7 +170,7 @@ func TestApprovedSourceServiceIsolatesOneFeedFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("isolated source failure returned cycle error: %v", err)
 	}
-	if len(result.Signals) != 2 || store.health[failedID].Status != StatusFailed {
+	if len(result.Signals) != len(catalog.Sources)-1 || store.health[failedID].Status != StatusFailed {
 		t.Fatalf("source failure was not isolated: result=%#v health=%#v", result, store.health)
 	}
 	for _, signal := range result.Signals {
@@ -268,9 +278,12 @@ func approvedFixtureAdapter(
 	source catalogSource,
 	status int,
 	body []byte,
-) (*FeedAdapter, *atomic.Int32) {
+) (SourceAdapter, *atomic.Int32) {
 	t.Helper()
 	var requests atomic.Int32
+	if source.AccessMethod == "api" {
+		return approvedHackerNewsFixtureAdapter(t, source, status, body, &requests), &requests
+	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requests.Add(1)
 		if request.Header.Get("User-Agent") != DefaultFeedUserAgent {
@@ -311,6 +324,87 @@ func approvedFixtureAdapter(
 		t.Fatalf("new approved fixture adapter: %v", err)
 	}
 	return adapter, &requests
+}
+
+func approvedHackerNewsFixtureAdapter(
+	t *testing.T,
+	source catalogSource,
+	status int,
+	body []byte,
+	requests *atomic.Int32,
+) *HackerNewsAdapter {
+	t.Helper()
+	var fixture hackerNewsFixture
+	if err := json.Unmarshal(body, &fixture); err != nil {
+		t.Fatalf("decode Hacker News fixture: %v", err)
+	}
+	itemsByID := make(map[int64]hackerNewsItem, len(fixture.Items))
+	for _, item := range fixture.Items {
+		itemsByID[item.ID] = item
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		if request.Header.Get("User-Agent") != DefaultFeedUserAgent {
+			t.Errorf("approved User-Agent is missing: %q", request.Header.Get("User-Agent"))
+		}
+		writer.Header().Set("Content-Type", source.AccessEvidence.ContentType)
+		writer.WriteHeader(status)
+		if status != http.StatusOK {
+			return
+		}
+		if request.URL.Path == "/v0/showstories.json" {
+			_ = json.NewEncoder(writer).Encode(fixture.StoryIDs)
+			return
+		}
+		const prefix = "/v0/item/"
+		if !strings.HasPrefix(request.URL.Path, prefix) || !strings.HasSuffix(request.URL.Path, ".json") {
+			t.Errorf("unexpected Hacker News fixture path: %s", request.URL.Path)
+			return
+		}
+		idText := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, prefix), ".json")
+		var id int64
+		if _, err := fmt.Sscan(idText, &id); err != nil {
+			t.Errorf("invalid Hacker News fixture id: %s", idText)
+			return
+		}
+		item, ok := itemsByID[id]
+		if !ok {
+			t.Errorf("missing Hacker News fixture item: %d", id)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(item)
+	}))
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse fixture server URL: %v", err)
+	}
+	adapter, err := NewHackerNewsAdapter(HackerNewsAdapterOptions{
+		ID:                  source.ID,
+		DisplayName:         source.DisplayName,
+		ListURL:             server.URL + "/v0/showstories.json",
+		AccessMethod:        source.AccessMethod,
+		FetchCadence:        "60m",
+		RateLimit:           source.RequestPolicy.RateLimit,
+		Tags:                []string{"public", "hacker-news", "startup", "launch"},
+		AllowedHosts:        []string{parsed.Host},
+		AllowedContentTypes: []string{source.AccessEvidence.ContentType},
+		Timeout:             time.Duration(source.RequestPolicy.TimeoutSeconds) * time.Second,
+		TotalTimeout:        3 * time.Duration(source.RequestPolicy.TimeoutSeconds) * time.Second,
+		MaxRedirects:        source.RequestPolicy.MaxRedirects,
+		MaxResponseBytes:    int64(source.RequestPolicy.MaxResponseBytes),
+		MaxItems:            source.RequestPolicy.MaxItems,
+		UserAgent:           DefaultFeedUserAgent,
+		Transport:           server.Client().Transport,
+		QualityPolicy: QualityPolicy{
+			MaxAge:        time.Duration(source.ExpectedFreshnessHours) * time.Hour,
+			MaxFutureSkew: 15 * time.Minute,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new approved Hacker News fixture adapter: %v", err)
+	}
+	return adapter
 }
 
 func readTestCatalog(t *testing.T) catalogContract {

@@ -34,6 +34,8 @@ type catalogSource struct {
 	PublisherAccessURL string   `json:"publisher_access_url"`
 	FeedURL            string   `json:"feed_url"`
 	TermsURL           string   `json:"terms_url"`
+	AttributionLabel   string   `json:"attribution_label"`
+	AttributionNotice  string   `json:"attribution_notice"`
 	ReusePolicy        string   `json:"reuse_policy"`
 	ReuseRequirements  []string `json:"reuse_requirements"`
 	AccessMethod       string   `json:"access_method"`
@@ -102,6 +104,11 @@ type atomFixture struct {
 	} `xml:"entry"`
 }
 
+type hackerNewsFixture struct {
+	StoryIDs []int64          `json:"story_ids"`
+	Items    []hackerNewsItem `json:"items"`
+}
+
 var (
 	eventHeadline = regexp.MustCompile(`(?i)^(.+?)\s+(raises|secures|launches)\b`)
 	fundingAmount = regexp.MustCompile(`(?i)([£$€])(\d+(?:\.\d+)?)\s*(million|billion|m|bn)\b`)
@@ -124,8 +131,8 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 	if catalog.GlobalPolicy.UnknownValuePolicy != "empty" || catalog.GlobalPolicy.Attribution == "" || catalog.GlobalPolicy.BreakingChange == "" || catalog.GlobalPolicy.Removal == "" {
 		t.Fatal("global source safety policies are incomplete")
 	}
-	if len(catalog.Sources) < 3 {
-		t.Fatalf("expected at least three approved sources, got %d", len(catalog.Sources))
+	if len(catalog.Sources) != len(approvedSourcePolicies)+1 {
+		t.Fatalf("expected the complete approved source set, got %d", len(catalog.Sources))
 	}
 
 	requiredMappings := []string{
@@ -141,11 +148,12 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 				t.Fatalf("source id is empty or duplicated: %q", source.ID)
 			}
 			seenIDs[source.ID] = true
-			if source.DisplayName == "" || source.Status != "approved" || source.AccessMethod != "atom" {
+			if source.DisplayName == "" || source.Status != "approved" ||
+				(source.AccessMethod != "atom" && source.AccessMethod != "api") {
 				t.Fatal("source identity or approval state is incomplete")
 			}
 			if len(source.Credentials) != 0 {
-				t.Fatal("approved public Atom source unexpectedly requires credentials")
+				t.Fatal("approved public source unexpectedly requires credentials")
 			}
 			for _, rawURL := range []string{source.PublisherPageURL, source.PublisherAccessURL, source.FeedURL, source.TermsURL} {
 				parsed, err := url.Parse(rawURL)
@@ -153,14 +161,16 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 					t.Fatalf("source URL is not safe HTTPS: %q", rawURL)
 				}
 			}
-			if source.ReusePolicy == "" || len(source.ReuseRequirements) < 2 {
+			if source.ReusePolicy == "" || len(source.ReuseRequirements) < 2 ||
+				source.AttributionLabel == "" || source.AttributionNotice == "" {
 				t.Fatal("approved source lacks reuse and attribution requirements")
 			}
 			if seenFeeds[source.FeedURL] {
 				t.Fatalf("feed URL is duplicated: %s", source.FeedURL)
 			}
 			seenFeeds[source.FeedURL] = true
-			if !source.AccessEvidence.PublisherAdvertised || !source.AccessEvidence.ReuseVerified || source.AccessEvidence.ProbedAt == "" || source.AccessEvidence.HTTPStatus != 200 || source.AccessEvidence.ContentType != "application/atom+xml" {
+			wantContentType := map[string]string{"atom": "application/atom+xml", "api": "application/json"}[source.AccessMethod]
+			if !source.AccessEvidence.PublisherAdvertised || !source.AccessEvidence.ReuseVerified || source.AccessEvidence.ProbedAt == "" || source.AccessEvidence.HTTPStatus != 200 || source.AccessEvidence.ContentType != wantContentType {
 				t.Fatal("publisher access or reuse evidence is incomplete")
 			}
 			policy := source.RequestPolicy
@@ -191,24 +201,56 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 				t.Fatal("fallback policy must degrade without scraping or replaying stale data")
 			}
 
-			actual := mapCatalogFixture(t, source.Fixture)
+			actual := mapCatalogFixture(t, source)
 			expected := expectedSourceRecord(t, source.FixtureExpected)
 			if !reflect.DeepEqual(actual, expected) {
 				t.Fatalf("fixture mapping mismatch\nactual:   %#v\nexpected: %#v", actual, expected)
 			}
 		})
 	}
+	if !seenIDs[hackerNewsShowSourceID] {
+		t.Fatal("catalog is missing the required Show HN launch source")
+	}
 }
 
-func mapCatalogFixture(t *testing.T, fixturePath string) SourceRecord {
+func mapCatalogFixture(t *testing.T, source catalogSource) SourceRecord {
 	t.Helper()
+	fixturePath := source.Fixture
 	clean := filepath.Clean(fixturePath)
-	if !strings.HasPrefix(clean, filepath.Join("testdata", "source_catalog")+string(filepath.Separator)) || filepath.Ext(clean) != ".xml" {
+	if !strings.HasPrefix(clean, filepath.Join("testdata", "source_catalog")+string(filepath.Separator)) {
 		t.Fatalf("fixture escapes approved testdata directory: %q", fixturePath)
 	}
 	data, err := os.ReadFile(clean)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if source.AccessMethod == "api" {
+		if filepath.Ext(clean) != ".json" {
+			t.Fatalf("API fixture must be JSON: %q", fixturePath)
+		}
+		var fixture hackerNewsFixture
+		if err := json.Unmarshal(data, &fixture); err != nil {
+			t.Fatal(err)
+		}
+		if len(fixture.StoryIDs) == 0 || len(fixture.Items) == 0 {
+			t.Fatal("Hacker News fixture must contain story ids and items")
+		}
+		itemsByID := make(map[int64]hackerNewsItem, len(fixture.Items))
+		for _, item := range fixture.Items {
+			itemsByID[item.ID] = item
+		}
+		item, ok := itemsByID[fixture.StoryIDs[0]]
+		if !ok {
+			t.Fatal("Hacker News fixture lacks its admitted story")
+		}
+		record, ok := mapHackerNewsItem(fixture.StoryIDs[0], item)
+		if !ok {
+			t.Fatal("Hacker News fixture admitted story was rejected")
+		}
+		return record
+	}
+	if filepath.Ext(clean) != ".xml" {
+		t.Fatalf("Atom fixture must be XML: %q", fixturePath)
 	}
 	var fixture atomFixture
 	if err := xml.Unmarshal(data, &fixture); err != nil {

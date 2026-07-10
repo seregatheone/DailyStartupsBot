@@ -29,3 +29,24 @@ func TestHealthFromDryRunPreservesQualityAccounting(t *testing.T) {
 		t.Fatal("health summary retained mutable rejection map")
 	}
 }
+
+func TestHealthFromDryRunDegradesForZeroYield(t *testing.T) {
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	result := ingestion.RunResult{Sources: []ingestion.SourceResult{{
+		SourceID: "source",
+		Status:   ingestion.StatusZeroYield,
+		Fetched:  2,
+		Skipped:  2,
+		Message:  "one or more source items were skipped",
+	}}}
+
+	summary := HealthFromDryRun(now, result)
+
+	if summary.Status != "degraded" || len(summary.RecentFailures) != 1 {
+		t.Fatalf("zero-yield source did not degrade health: %#v", summary)
+	}
+	if summary.RecentFailures[0].Component != "source:source" ||
+		summary.RecentFailures[0].Message != result.Sources[0].Message {
+		t.Fatalf("unexpected zero-yield failure summary: %#v", summary.RecentFailures)
+	}
+}

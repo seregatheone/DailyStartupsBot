@@ -2,12 +2,12 @@
   "schema_version": 1,
   "reviewed_at": "2026-07-10",
   "global_policy": {
-    "access_scope": "Read only publisher-advertised public Atom endpoints; never scrape article HTML as fallback.",
+    "access_scope": "Read only publisher-advertised public Atom or JSON API endpoints; never scrape article HTML as fallback.",
     "unknown_value_policy": "empty",
-    "attribution": "Every displayed signal names the publishing organisation, links the exact Atom entry source_url, and makes the Open Government Licence v3.0 attribution available.",
+    "attribution": "Every displayed signal names the publishing organisation, links its exact source_url, and shows the source-specific attribution label, terms link, and notice.",
     "breaking_format_change": "Fail closed, mark only that source degraded, keep other sources running, and require fixture plus catalog review before accepting the new format.",
     "removal": "Disable fetching and public display immediately when the publisher withdraws the feed or reuse permission, access becomes authenticated or prohibited, mapping becomes unsafe, or attribution can no longer be preserved. Historical source metadata may remain only for internal audit.",
-    "content_policy": "Store title-derived metadata and a bounded plain-text Atom summary only. Do not mirror article bodies, images, logos, personal data, third-party works, or imply publisher endorsement."
+    "content_policy": "Store title-derived metadata and only the bounded fields approved per source. Do not mirror article bodies, raw payloads, images, logos, personal data, comments, third-party works, or imply publisher endorsement."
   },
   "sources": [
     {
@@ -18,6 +18,8 @@
       "publisher_access_url": "https://www.gov.uk/government/organisations/innovate-uk",
       "feed_url": "https://www.gov.uk/government/organisations/innovate-uk.atom",
       "terms_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/",
+      "attribution_label": "OGL v3.0",
+      "attribution_notice": "нормализованное резюме",
       "reuse_policy": "GOV.UK public-sector information is reusable under the Open Government Licence v3.0, including commercial and adapted use, subject to attribution and exclusions.",
       "reuse_requirements": [
         "Show Innovate UK as the publisher and link the original GOV.UK entry.",
@@ -130,6 +132,8 @@
       "publisher_access_url": "https://www.gov.uk/government/organisations/uk-research-and-innovation",
       "feed_url": "https://www.gov.uk/government/organisations/uk-research-and-innovation.atom",
       "terms_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/",
+      "attribution_label": "OGL v3.0",
+      "attribution_notice": "нормализованное резюме",
       "reuse_policy": "GOV.UK public-sector information is reusable under the Open Government Licence v3.0, including commercial and adapted use, subject to attribution and exclusions.",
       "reuse_requirements": [
         "Show UK Research and Innovation as the publisher and link the original GOV.UK entry.",
@@ -242,6 +246,8 @@
       "publisher_access_url": "https://www.gov.uk/government/organisations/british-business-bank",
       "feed_url": "https://www.gov.uk/government/organisations/british-business-bank.atom",
       "terms_url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/",
+      "attribution_label": "OGL v3.0",
+      "attribution_notice": "нормализованное резюме",
       "reuse_policy": "GOV.UK public-sector information is reusable under the Open Government Licence v3.0, including commercial and adapted use, subject to attribution and exclusions.",
       "reuse_requirements": [
         "Show British Business Bank as the publisher and link the original GOV.UK entry.",
@@ -345,6 +351,120 @@
         "serve_stale_as_new": false
       },
       "fixture": "testdata/source_catalog/british-business-bank.xml"
+    },
+    {
+      "id": "hacker-news-show",
+      "display_name": "Hacker News Show HN",
+      "status": "approved",
+      "publisher_page_url": "https://news.ycombinator.com/show",
+      "publisher_access_url": "https://github.com/HackerNews/API",
+      "feed_url": "https://hacker-news.firebaseio.com/v0/showstories.json",
+      "terms_url": "https://github.com/HackerNews/API",
+      "attribution_label": "HN API",
+      "attribution_notice": "публичная публикация",
+      "reuse_policy": "The official API publishes public Hacker News story metadata in near real time; the digest stores only bounded launch title metadata and links to the original discussion.",
+      "reuse_requirements": [
+        "Show Hacker News as the source and link the original discussion.",
+        "Do not store submitter profiles, comments, story text, votes or raw API payloads.",
+        "Do not imply that Hacker News or Y Combinator endorses the digest."
+      ],
+      "access_method": "api",
+      "credentials": [],
+      "access_evidence": {
+        "publisher_advertised_feed": true,
+        "reuse_verified": true,
+        "probed_at": "2026-07-10",
+        "http_status": 200,
+        "content_type": "application/json"
+      },
+      "request_policy": {
+        "cadence_minutes": 60,
+        "timeout_seconds": 5,
+        "max_redirects": 0,
+        "max_response_bytes": 65536,
+        "max_items": 40,
+        "rate_limit": "at most 41 requests per 60 minutes",
+        "redirect_policy": "no redirects; every API request remains HTTPS on hacker-news.firebaseio.com",
+        "user_agent_required": true
+      },
+      "expected_freshness_hours": 168,
+      "accepted_item_policy": "Accept only a live story whose title begins with Show HN and identifies one bounded product name, optionally followed by an explicit dash-separated tagline. Skip sentence-like, first-person, dead, deleted and malformed items.",
+      "field_mapping": {
+        "startup_name": {
+          "source": "item.title",
+          "rule": "Extract one safe product name after Show HN and before an explicit tagline separator, or accept a tightly bounded bare product name.",
+          "on_missing": "skip"
+        },
+        "canonical_url": {
+          "source": "item.url",
+          "rule": "Retain only an absolute HTTPS product URL without userinfo; never fetch it.",
+          "on_missing": "empty"
+        },
+        "source_url": {
+          "source": "item.id",
+          "rule": "Build the exact HTTPS news.ycombinator.com discussion URL from the validated numeric item id.",
+          "on_missing": "skip"
+        },
+        "signal_type": {
+          "source": "constant",
+          "rule": "Every admitted Show HN item maps to launch.",
+          "on_missing": "launch"
+        },
+        "published_at": {
+          "source": "item.time",
+          "rule": "Convert the positive Unix timestamp to UTC; never substitute fetch time.",
+          "on_missing": "skip"
+        },
+        "description": {
+          "source": "item.title",
+          "rule": "Use only the bounded plain-text tagline after the product name separator.",
+          "on_missing": "empty"
+        },
+        "region": {
+          "source": "none",
+          "rule": "A Show HN story does not prove company region.",
+          "on_missing": "empty"
+        },
+        "categories": {
+          "source": "none",
+          "rule": "The API exposes no reviewed stable product taxonomy.",
+          "on_missing": "empty"
+        },
+        "funding": {
+          "source": "none",
+          "rule": "A Show HN launch does not prove funding data.",
+          "on_missing": "empty"
+        },
+        "raw_payload": {
+          "source": "none",
+          "rule": "The adapter decodes only required item fields and stores no raw JSON, submitter, comment, vote or story text data.",
+          "on_missing": "empty"
+        }
+      },
+      "fixture_expected": {
+        "startup_name": "Runloom",
+        "canonical_url": "https://runloom.example",
+        "source_url": "https://news.ycombinator.com/item?id=501",
+        "signal_type": "launch",
+        "published_at": "2026-07-10T08:00:00Z",
+        "description": "Run local workflows safely.",
+        "region": "",
+        "categories": [],
+        "funding": {
+          "round": "",
+          "amount": "",
+          "currency": "",
+          "investors": []
+        },
+        "raw_payload": ""
+      },
+      "fallback_policy": {
+        "on_failure": "mark this source degraded and continue other sources",
+        "retry": "next scheduled cadence with bounded backoff",
+        "html_scraping": false,
+        "serve_stale_as_new": false
+      },
+      "fixture": "testdata/source_catalog/hacker-news-show.json"
     }
   ]
 }

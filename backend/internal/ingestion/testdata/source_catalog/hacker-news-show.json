@@ -1,0 +1,28 @@
+{
+  "story_ids": [501, 502, 503],
+  "items": [
+    {
+      "id": 501,
+      "type": "story",
+      "time": 1783670400,
+      "title": "Show HN: Runloom – Run local workflows safely.",
+      "url": "https://runloom.example",
+      "by": "fixture-private-user",
+      "text": "token=fixture-secret",
+      "kids": [9001]
+    },
+    {
+      "id": 502,
+      "type": "story",
+      "time": 1783670460,
+      "title": "Show HN: I mapped every bakery in London"
+    },
+    {
+      "id": 503,
+      "type": "story",
+      "time": 1783670520,
+      "title": "Show HN: Removed – This must not appear",
+      "deleted": true
+    }
+  ]
+}

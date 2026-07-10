@@ -275,8 +275,9 @@ func renderAttribution(sources []SourceAttribution) string {
 		}
 		if isApproved {
 			parts = append(parts, fmt.Sprintf(
-				`<a href="%s">OGL v3.0</a> · %s`,
+				`<a href="%s">%s</a> · %s`,
 				html.EscapeString(approved.TermsURL),
+				html.EscapeString(approved.Label),
 				html.EscapeString(approved.Notice),
 			))
 		}

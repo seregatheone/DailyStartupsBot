@@ -20,6 +20,7 @@ import (
 var approvedSourceCatalogJSON []byte
 
 var (
+	hackerNewsShowSourceID      = "hacker-news-show"
 	approvedEventHeadline       = regexp.MustCompile(`(?i)^(.+?)\s+(raises|secures|launches|wins|receives|acquires|is acquired by)\b`)
 	approvedFundingAmount       = regexp.MustCompile(`(?i)([£$€])(\d+(?:\.\d+)?)\s*(million|billion|m|bn)\b`)
 	approvedFundingRound        = regexp.MustCompile(`(?i)\b(pre-seed|seed|series\s+[a-z]|growth)\b`)
@@ -58,6 +59,8 @@ type runtimeCatalogSource struct {
 	Status                 string   `json:"status"`
 	FeedURL                string   `json:"feed_url"`
 	TermsURL               string   `json:"terms_url"`
+	AttributionLabel       string   `json:"attribution_label"`
+	AttributionNotice      string   `json:"attribution_notice"`
 	AccessMethod           string   `json:"access_method"`
 	Credentials            []string `json:"credentials"`
 	ExpectedFreshnessHours int      `json:"expected_freshness_hours"`
@@ -131,18 +134,21 @@ func AssembleRuntime(
 type ApprovedAttribution struct {
 	DisplayName string
 	TermsURL    string
+	Label       string
 	Notice      string
 }
 
 func ApprovedSourceAttribution(sourceID string) (ApprovedAttribution, bool) {
 	source, ok := findRuntimeSource(sourceID)
-	if !ok || source.Status != "approved" || source.DisplayName == "" || source.TermsURL == "" {
+	if !ok || source.Status != "approved" || source.DisplayName == "" || source.TermsURL == "" ||
+		source.AttributionLabel == "" || source.AttributionNotice == "" {
 		return ApprovedAttribution{}, false
 	}
 	return ApprovedAttribution{
 		DisplayName: source.DisplayName,
 		TermsURL:    source.TermsURL,
-		Notice:      "нормализованное резюме",
+		Label:       source.AttributionLabel,
+		Notice:      source.AttributionNotice,
 	}, true
 }
 
@@ -151,28 +157,34 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 	if err != nil {
 		return Registry{}, nil, err
 	}
-	if catalog.SchemaVersion != 1 || catalog.ReviewedAt == "" || len(catalog.Sources) != len(approvedSourcePolicies) {
+	if catalog.SchemaVersion != 1 || catalog.ReviewedAt == "" ||
+		len(catalog.Sources) != len(approvedSourcePolicies)+1 {
 		return Registry{}, nil, errors.New("approved source catalog metadata is invalid")
 	}
 
 	adapters := make([]SourceAdapter, 0, len(catalog.Sources))
 	configs := make([]config.SourceConfig, 0, len(catalog.Sources))
 	seen := make(map[string]bool, len(catalog.Sources))
-	seenFeeds := make(map[string]bool, len(catalog.Sources))
+	seenEndpoints := make(map[string]bool, len(catalog.Sources))
 	for _, source := range catalog.Sources {
-		policy, supported := approvedSourcePolicies[source.ID]
-		if !supported || seen[source.ID] || source.Status != "approved" || source.AccessMethod != "atom" || len(source.Credentials) != 0 {
+		policy, isGOVUKSource := approvedSourcePolicies[source.ID]
+		isHackerNewsSource := source.ID == hackerNewsShowSourceID
+		if (!isGOVUKSource && !isHackerNewsSource) || seen[source.ID] || source.Status != "approved" || len(source.Credentials) != 0 {
 			return Registry{}, nil, errors.New("approved source catalog contains unsupported source")
+		}
+		if (isGOVUKSource && source.AccessMethod != "atom") || (isHackerNewsSource && source.AccessMethod != "api") {
+			return Registry{}, nil, errors.New("approved source catalog contains unsupported access method")
 		}
 		seen[source.ID] = true
 		parsedFeedURL, err := url.Parse(source.FeedURL)
 		parsedTermsURL, termsErr := url.Parse(source.TermsURL)
-		if err != nil || parsedFeedURL.Scheme != "https" || parsedFeedURL.Host == "" || parsedFeedURL.User != nil || seenFeeds[source.FeedURL] ||
+		if err != nil || parsedFeedURL.Scheme != "https" || parsedFeedURL.Host == "" || parsedFeedURL.User != nil || seenEndpoints[source.FeedURL] ||
 			termsErr != nil || parsedTermsURL.Scheme != "https" || parsedTermsURL.Host == "" || parsedTermsURL.User != nil {
 			return Registry{}, nil, errors.New("approved source catalog contains unsafe URL")
 		}
-		seenFeeds[source.FeedURL] = true
+		seenEndpoints[source.FeedURL] = true
 		if source.DisplayName == "" || source.AccessEvidence.ContentType == "" ||
+			source.AttributionLabel == "" || source.AttributionNotice == "" ||
 			source.ExpectedFreshnessHours < 1 || source.FallbackPolicy.ServeStaleAsNew ||
 			source.RequestPolicy.CadenceMinutes < 1 || source.RequestPolicy.TimeoutSeconds < 1 ||
 			source.RequestPolicy.MaxRedirects < 0 || source.RequestPolicy.MaxResponseBytes < 1 ||
@@ -181,27 +193,52 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 			return Registry{}, nil, errors.New("approved source catalog runtime policy is incomplete")
 		}
 
-		adapter, err := NewFeedAdapter(FeedAdapterOptions{
-			ID:                  source.ID,
-			DisplayName:         source.DisplayName,
-			FeedURL:             source.FeedURL,
-			AccessMethod:        source.AccessMethod,
-			FetchCadence:        fmt.Sprintf("%dm", source.RequestPolicy.CadenceMinutes),
-			RateLimit:           source.RequestPolicy.RateLimit,
-			Tags:                []string{"public", "govuk", "startup"},
-			AllowedHosts:        []string{strings.ToLower(parsedFeedURL.Host)},
-			AllowedContentTypes: []string{source.AccessEvidence.ContentType},
-			Timeout:             time.Duration(source.RequestPolicy.TimeoutSeconds) * time.Second,
-			MaxRedirects:        source.RequestPolicy.MaxRedirects,
-			MaxResponseBytes:    source.RequestPolicy.MaxResponseBytes,
-			MaxItems:            source.RequestPolicy.MaxItems,
-			UserAgent:           DefaultFeedUserAgent,
-			Mapper:              approvedSourceMapper(policy),
-			QualityPolicy: QualityPolicy{
-				MaxAge:        time.Duration(source.ExpectedFreshnessHours) * time.Hour,
-				MaxFutureSkew: 15 * time.Minute,
-			},
-		})
+		tags := []string{"public", "govuk", "startup"}
+		qualityPolicy := QualityPolicy{
+			MaxAge:        time.Duration(source.ExpectedFreshnessHours) * time.Hour,
+			MaxFutureSkew: 15 * time.Minute,
+		}
+		var adapter SourceAdapter
+		if isHackerNewsSource {
+			tags = []string{"public", "hacker-news", "startup", "launch"}
+			adapter, err = NewHackerNewsAdapter(HackerNewsAdapterOptions{
+				ID:                  source.ID,
+				DisplayName:         source.DisplayName,
+				ListURL:             source.FeedURL,
+				AccessMethod:        source.AccessMethod,
+				FetchCadence:        fmt.Sprintf("%dm", source.RequestPolicy.CadenceMinutes),
+				RateLimit:           source.RequestPolicy.RateLimit,
+				Tags:                tags,
+				AllowedHosts:        []string{strings.ToLower(parsedFeedURL.Host)},
+				AllowedContentTypes: []string{source.AccessEvidence.ContentType},
+				Timeout:             time.Duration(source.RequestPolicy.TimeoutSeconds) * time.Second,
+				TotalTimeout:        3 * time.Duration(source.RequestPolicy.TimeoutSeconds) * time.Second,
+				MaxRedirects:        source.RequestPolicy.MaxRedirects,
+				MaxResponseBytes:    source.RequestPolicy.MaxResponseBytes,
+				MaxItems:            source.RequestPolicy.MaxItems,
+				UserAgent:           DefaultFeedUserAgent,
+				QualityPolicy:       qualityPolicy,
+			})
+		} else {
+			adapter, err = NewFeedAdapter(FeedAdapterOptions{
+				ID:                  source.ID,
+				DisplayName:         source.DisplayName,
+				FeedURL:             source.FeedURL,
+				AccessMethod:        source.AccessMethod,
+				FetchCadence:        fmt.Sprintf("%dm", source.RequestPolicy.CadenceMinutes),
+				RateLimit:           source.RequestPolicy.RateLimit,
+				Tags:                tags,
+				AllowedHosts:        []string{strings.ToLower(parsedFeedURL.Host)},
+				AllowedContentTypes: []string{source.AccessEvidence.ContentType},
+				Timeout:             time.Duration(source.RequestPolicy.TimeoutSeconds) * time.Second,
+				MaxRedirects:        source.RequestPolicy.MaxRedirects,
+				MaxResponseBytes:    source.RequestPolicy.MaxResponseBytes,
+				MaxItems:            source.RequestPolicy.MaxItems,
+				UserAgent:           DefaultFeedUserAgent,
+				Mapper:              approvedSourceMapper(policy),
+				QualityPolicy:       qualityPolicy,
+			})
+		}
 		if err != nil {
 			return Registry{}, nil, fmt.Errorf("approved source adapter %s is invalid: %w", source.ID, err)
 		}
@@ -212,9 +249,12 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 			Active:       true,
 			AccessMethod: source.AccessMethod,
 			FetchCadence: fmt.Sprintf("%dm", source.RequestPolicy.CadenceMinutes),
-			Tags:         []string{"public", "govuk", "startup"},
+			Tags:         tags,
 			RateLimit:    source.RequestPolicy.RateLimit,
 		})
+	}
+	if !seen[hackerNewsShowSourceID] || len(seen) != len(approvedSourcePolicies)+1 {
+		return Registry{}, nil, errors.New("approved source catalog is missing required launch source")
 	}
 	return NewRegistry(adapters...), configs, nil
 }

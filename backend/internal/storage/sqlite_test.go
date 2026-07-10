@@ -924,6 +924,28 @@ func TestSkippedSourceHealthIsNotDegradedOrReportedAsFailure(t *testing.T) {
 	}
 }
 
+func TestZeroYieldSourceHealthIsDegradedAndSanitized(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC)
+	must(t, repo.SaveSourceHealth(ctx, SourceHealth{
+		SourceID: "hacker-news-show", Status: "zero_yield", LastIngestionAt: now,
+		LastError: "raw upstream title must stay private",
+	}))
+
+	snapshot, err := repo.GetHealthSnapshot(ctx, 10)
+	must(t, err)
+	if !snapshot.Degraded || len(snapshot.RecentFailures) != 1 || len(snapshot.Sources) != 1 ||
+		snapshot.Sources[0].Status != "zero_yield" {
+		t.Fatalf("zero-yield source did not degrade persistent health: %#v", snapshot)
+	}
+	if snapshot.RecentFailures[0].Component != "source:hacker-news-show" ||
+		snapshot.RecentFailures[0].Message != "source is unhealthy" ||
+		strings.Contains(fmt.Sprintf("%#v", snapshot), "raw upstream title") {
+		t.Fatalf("zero-yield health exposed unsafe detail: %#v", snapshot)
+	}
+}
+
 func TestGetHealthSnapshotOrdersSubsecondActivityChronologically(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
