@@ -34,9 +34,17 @@ Bot:
 - `DAILY_STARTUPS_BACKEND_BASE_URL`
 - `DAILY_STARTUPS_POLL_TIMEOUT_SECONDS`
 - `DAILY_STARTUPS_POLL_OFFSET_PATH` (default: `./data/telegram-offset.json`)
+- `DAILY_STARTUPS_BOT_LOCK_PATH` (default: `./data/bot.lock`)
 - `DAILY_STARTUPS_DELIVERY_POLL_INTERVAL_SECONDS` (default: `30`)
 - `DAILY_STARTUPS_WORKER_RETRY_BACKOFF_SECONDS` (default: `5`)
 - `DAILY_STARTUPS_DRY_RUN`
+
+Live supervisor:
+
+- `DAILY_STARTUPS_RUNTIME_DIR` (default: `.runtime/daily-startups`)
+- `DAILY_STARTUPS_SUPERVISOR_READINESS_TIMEOUT_SECONDS` (default: `30`)
+- `DAILY_STARTUPS_SUPERVISOR_RESTART_BACKOFF_SECONDS` (default: `5`)
+- `DAILY_STARTUPS_SUPERVISOR_SHUTDOWN_GRACE_SECONDS` (default: `10`)
 
 Не коммитьте реальные токены, API keys, локальные базы и сгенерированное runtime state.
 
@@ -88,6 +96,43 @@ curl --fail http://127.0.0.1:8080/health
 ```
 
 После изменения отправьте `/status`, чтобы проверить сохранённые значения.
+
+## Воспроизводимый live-запуск
+
+`make live-up` — основная foreground-команда для совместного запуска backend и bot. Сначала она запускает backend и ждёт корректный `/health`, затем запускает ровно один bot process. Сервисы читают только экспортированные переменные процесса: supervisor не загружает `.env` автоматически.
+
+```bash
+export DAILY_STARTUPS_TELEGRAM_TOKEN='replace-with-test-token'
+make live-up
+```
+
+По умолчанию runtime metadata находится в `.runtime/daily-startups` относительно корня repository: `supervisor.lock`, `backend.pid`, `bot.pid`, `backend.log` и `bot.log`. Directory и файлы создаются private, logs открываются в append mode и не содержат environment/command lines. Backend и bot работают в отдельных process groups. После initial readiness падение backend не останавливает bot: supervisor повторно запускает backend через `DAILY_STARTUPS_SUPERVISOR_RESTART_BACKOFF_SECONDS` и снова ждёт readiness. Падение bot приводит к независимому запуску одной замены без перезапуска backend.
+
+Для наблюдения используйте отдельные logs и health:
+
+```bash
+tail -F .runtime/daily-startups/backend.log .runtime/daily-startups/bot.log
+curl --fail-with-body http://127.0.0.1:8080/health
+```
+
+`DAILY_STARTUPS_SUPERVISOR_READINESS_TIMEOUT_SECONDS` ограничивает initial/restart readiness, а `DAILY_STARTUPS_SUPERVISOR_SHUTDOWN_GRACE_SECONDS` — ожидание после SIGTERM перед принудительной остановкой process group. `Ctrl-C` завершает оба сервиса и удаляет PID metadata, но сохраняет backend SQLite, Telegram polling checkpoint и logs. Lock-файлы advisory: оставшийся stale файл без kernel lock не мешает следующему запуску.
+
+`make live-smoke` не требует Telegram token и не обращается к Telegram. Он использует временные runtime directory, SQLite и loopback port, запускает реальный backend со stub bot, сохраняет test subscriber, имитирует SIGKILL outage backend, проверяет новый backend PID/readiness при неизменном bot PID и очищает процессы. Успех завершается event `smoke_passed`; PID files удаляются, а временные DB и logs остаются доступны до завершения сценария.
+
+Dry-run и live mode разделены явно: `make dry-run-backend` выполняет безопасный backend cycle без Telegram, а `make live-up` принудительно запускает дочерние сервисы с `DAILY_STARTUPS_DRY_RUN=false` и требует live bot token в environment. Не передавайте token в аргументах команды и не сохраняйте его в tracked `.env`, plist или logs.
+
+### Конфликты запуска
+
+- Второй `make live-up` завершается из-за занятого `supervisor.lock`, не создавая дополнительные процессы.
+- Занятый backend port или выход backend до readiness приводит к безопасной startup error и очистке дочерних процессов/PID files. Освободите адрес из `DAILY_STARTUPS_BACKEND_ADDR` либо настройте согласованные `DAILY_STARTUPS_BACKEND_ADDR` и `DAILY_STARTUPS_BACKEND_BASE_URL`.
+- Второй direct live bot с тем же `DAILY_STARTUPS_BOT_LOCK_PATH` завершается до чтения checkpoint и вызова Telegram, поэтому локальный duplicate poller не доводит до `getUpdates` 409 Conflict.
+- Advisory locks локальны машине и пути. Если 409 всё же появился, остановите другой deployment с тем же bot token на другом host либо процесс, запущенный с другим lock path.
+
+### Optional macOS LaunchAgent
+
+Шаблон [`ops/launchd/com.dailystartups.live.plist.example`](ops/launchd/com.dailystartups.live.plist.example) запускает `make -C __REPOSITORY_ROOT__ live-up` с `RunAtLoad` и `KeepAlive`. Скопируйте его во внешний, неотслеживаемый plist, замените `__REPOSITORY_ROOT__` и проверьте локальную копию через `plutil -lint`.
+
+Шаблон намеренно не содержит token, session data, персональных путей или `EnvironmentVariables`. До загрузки LaunchAgent передайте live configuration и `DAILY_STARTUPS_TELEGRAM_TOKEN` через защищённое внешнее окружение service manager; repository `.env` не читается. При `KeepAlive` для намеренной остановки сначала выгрузите LaunchAgent, иначе launchd снова запустит foreground supervisor. Backend/bot logs и PID metadata остаются в настроенном `DAILY_STARTUPS_RUNTIME_DIR`.
 
 ## Live-прогон Telegram
 
@@ -219,7 +264,8 @@ Legacy client может не передавать `sequence`: aggregate success
 make test
 make test-backend
 make test-bot
+make test-ops
 make check-localization
 ```
 
-`make check-localization` проверяет реальные bot-owned command responses, технический allowlist и Telegram metadata. Machine-readable API fields, slash-команды, log keys, region/category codes и timezone IDs намеренно не переводятся.
+`make test-ops` проверяет supervisor и process locks без live credentials. `make check-localization` проверяет реальные bot-owned command responses, технический allowlist и Telegram metadata. Machine-readable API fields, slash-команды, log keys, region/category codes и timezone IDs намеренно не переводятся.
