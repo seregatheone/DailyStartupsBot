@@ -85,6 +85,7 @@ type FeedAdapterOptions struct {
 	UserAgent           string
 	Transport           http.RoundTripper
 	Mapper              FeedMapper
+	QualityPolicy       QualityPolicy
 }
 
 type FeedAdapter struct {
@@ -123,6 +124,9 @@ func NewFeedAdapter(options FeedAdapterOptions) (*FeedAdapter, error) {
 		options.MaxResponseBytes <= 0 || options.MaxResponseBytes > 10<<20 ||
 		options.MaxItems <= 0 || options.MaxItems > 1000 {
 		return nil, errors.New("feed adapter network bounds are invalid")
+	}
+	if options.QualityPolicy.MaxAge < 0 || options.QualityPolicy.MaxFutureSkew < 0 {
+		return nil, errors.New("feed adapter quality policy is invalid")
 	}
 	if strings.TrimSpace(options.UserAgent) == "" || len(options.UserAgent) > 256 || strings.ContainsAny(options.UserAgent, "\r\n") {
 		return nil, errors.New("feed adapter User-Agent is required")
@@ -180,12 +184,13 @@ func NewFeedAdapter(options FeedAdapterOptions) (*FeedAdapter, error) {
 
 	return &FeedAdapter{
 		metadata: SourceMetadata{
-			ID:           strings.TrimSpace(options.ID),
-			DisplayName:  strings.TrimSpace(options.DisplayName),
-			AccessMethod: options.AccessMethod,
-			FetchCadence: strings.TrimSpace(options.FetchCadence),
-			RateLimit:    strings.TrimSpace(options.RateLimit),
-			Tags:         append([]string(nil), options.Tags...),
+			ID:            strings.TrimSpace(options.ID),
+			DisplayName:   strings.TrimSpace(options.DisplayName),
+			AccessMethod:  options.AccessMethod,
+			FetchCadence:  strings.TrimSpace(options.FetchCadence),
+			RateLimit:     strings.TrimSpace(options.RateLimit),
+			Tags:          append([]string(nil), options.Tags...),
+			QualityPolicy: options.QualityPolicy,
 		},
 		feedURL:             parsedFeedURL.String(),
 		allowedHosts:        allowedHosts,

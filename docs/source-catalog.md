@@ -36,6 +36,14 @@ Duplicate/unknown IDs, credentials и несовпадение approved access m
 
 Scheduler — единственный runtime consumer, который запускает ingestion fetch. Перед HTTP request он атомарно сохраняет отдельный `last_attempt_at`; этот timestamp переживает restart и переход health в `skipped`, поэтому crash-loop или быстрое disable/re-enable не обходят 60-минутный cadence. Если reservation нельзя записать, network request не выполняется. `/v1/digests/preview` выбирает сохранённые signals за локальные календарные сутки запрошенного timezone и никогда не инициирует сетевой запрос. Отключённый source записывает health status `skipped`, заменяя прежний failure; `skipped` не переводит общий `/health` в `degraded`.
 
+## Quality gate и дедупликация
+
+До persistence каждый production record проходит immutable policy своего adapter. Максимальный возраст берётся только из catalog: Innovate UK — 504 часа, UKRI — 168 часов, British Business Bank — 720 часов; `serve_stale_as_new` обязан оставаться `false`. Timestamp более чем на 15 минут в будущем также отклоняется. Отсутствующие source ID, company name, exact HTTPS source URL или publication time не дополняются fetch time.
+
+Каждый skip учитывается без raw content: adapter-level rejection, quality reason (`missing_*`, `invalid_*`, `stale`, `future`) и storage failure имеют отдельные counters. Для активного source выполняются инварианты `fetched = normalized + skipped` и `skipped = adapter_skipped + quality_rejected`; ошибка SQLite не маскируется как плохой upstream record.
+
+URL identity удаляет только однозначные tracking keys (`utm_*`, `gclid`, `fbclid`, `msclkid`, `mc_cid`, `mc_eid`, `_hs*`), сохраняя функциональные query parameters, включая `ref`. Attribution продолжает использовать точный publisher URL. Digest объединяет exact company names в пределах запрошенного local digest day/region; fuzzy matching не используется. Legal suffix удаляется только при одинаковом source-event URL или точном непустом funding amount+currency. Два разных canonical URLs всегда остаются разными, а unanchored alias не может связать их транзитивно.
+
 ## Общий контракт `SourceRecord`
 
 | Поле | Источник и правило | Если нет уверенности |

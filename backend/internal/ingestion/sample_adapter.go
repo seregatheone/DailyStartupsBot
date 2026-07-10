@@ -37,6 +37,9 @@ func (adapter SamplePublicAdapter) Metadata() SourceMetadata {
 		FetchCadence: "daily",
 		RateLimit:    "local",
 		Tags:         []string{"sample", "public"},
+		QualityPolicy: QualityPolicy{
+			MaxFutureSkew: 15 * time.Minute,
+		},
 	}
 }
 

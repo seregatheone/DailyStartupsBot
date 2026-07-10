@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -80,8 +82,8 @@ func TestServiceNormalizesAndStoresSamplePublicSignals(t *testing.T) {
 	if signal.SourceID != "sample-public" || signal.SignalType != "launch" || signal.StartupName != "Acme AI" {
 		t.Fatalf("unexpected normalized signal: %#v", signal)
 	}
-	if len(DeduplicationKeys(signal)) != 1 {
-		t.Fatalf("expected deduplication key for signal")
+	if len(DeduplicationKeys(signal)) < 2 {
+		t.Fatalf("expected canonical and alias deduplication keys for signal")
 	}
 	if len(store.signals) != 1 {
 		t.Fatalf("expected signal to be stored, got %#v", store.signals)
@@ -136,7 +138,8 @@ func TestServiceReturnsRecoverableErrorWhenSignalPersistenceFails(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "store signal for source source") {
 		t.Fatalf("expected recoverable persistence error, got %v", err)
 	}
-	if len(result.Sources) != 1 || result.Sources[0].Status != StatusFailed || result.Sources[0].Stored != 0 {
+	if len(result.Sources) != 1 || result.Sources[0].Status != StatusFailed || result.Sources[0].Stored != 0 ||
+		result.Sources[0].StoreFailed != 1 || result.Sources[0].Skipped != 0 {
 		t.Fatalf("unexpected failed persistence result: %#v", result.Sources)
 	}
 	if store.health["source"].Status != StatusFailed {
@@ -155,11 +158,95 @@ func TestServiceAccountsForAdapterLevelSkippedItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run ingestion: %v", err)
 	}
-	if len(result.Sources) != 1 || result.Sources[0].Fetched != 3 || result.Sources[0].Normalized != 1 || result.Sources[0].Skipped != 2 {
+	if len(result.Sources) != 1 || result.Sources[0].Fetched != 3 || result.Sources[0].Normalized != 1 ||
+		result.Sources[0].Skipped != 2 || result.Sources[0].AdapterSkipped != 2 ||
+		result.Sources[0].QualityRejected != 0 || result.Sources[0].RejectionReasons["adapter_rejected"] != 2 {
 		t.Fatalf("unexpected adapter skip accounting: %#v", result.Sources)
 	}
 	if result.Sources[0].Message != "one or more source items were skipped" {
 		t.Fatalf("unexpected safe skip message: %q", result.Sources[0].Message)
+	}
+}
+
+func TestServiceReportsBoundedQualityRejectionAccounting(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	valid := validRecord("ValidCo")
+	valid.PublishedAt = now.Add(-time.Hour)
+	missingTime := validRecord("MissingTime")
+	missingTime.PublishedAt = time.Time{}
+	stale := validRecord("StaleCo")
+	stale.PublishedAt = now.Add(-8 * 24 * time.Hour)
+	future := validRecord("FutureCo")
+	future.PublishedAt = now.Add(16 * time.Minute)
+	store := &memoryStore{}
+	service := NewService(NewRegistry(fakeAdapter{
+		id: "source", accessMethod: "atom", skipped: 2,
+		records:       []SourceRecord{valid, missingTime, stale, future},
+		qualityPolicy: QualityPolicy{MaxAge: 7 * 24 * time.Hour, MaxFutureSkew: 15 * time.Minute},
+	}), store)
+	service.now = func() time.Time { return now }
+
+	result, err := service.Run(context.Background(), []config.SourceConfig{{
+		ID: "source", Active: true, AccessMethod: "atom",
+	}})
+	if err != nil {
+		t.Fatalf("run quality accounting: %v", err)
+	}
+	if len(result.Sources) != 1 {
+		t.Fatalf("unexpected source result: %#v", result)
+	}
+	source := result.Sources[0]
+	if source.Fetched != 6 || source.Normalized != 1 || source.Stored != 1 || source.Skipped != 5 ||
+		source.AdapterSkipped != 2 || source.QualityRejected != 3 || source.StoreFailed != 0 ||
+		source.Fetched != source.Normalized+source.Skipped {
+		t.Fatalf("quality counters violate invariants: %#v", source)
+	}
+	wantReasons := map[string]int{
+		"adapter_rejected":               2,
+		string(RejectMissingPublishedAt): 1,
+		string(RejectStale):              1,
+		string(RejectFuture):             1,
+	}
+	if !reflect.DeepEqual(source.RejectionReasons, wantReasons) {
+		t.Fatalf("unexpected bounded reasons: got=%#v want=%#v", source.RejectionReasons, wantReasons)
+	}
+	if len(result.Signals) != 1 || len(store.signals) != 1 || strings.Contains(source.Message, "https://") {
+		t.Fatalf("quality rejection leaked or stored invalid data: result=%#v store=%#v", result, store.signals)
+	}
+}
+
+func TestRepeatedIngestionSnapshotIsSQLiteIdempotent(t *testing.T) {
+	ctx := context.Background()
+	repository, err := storage.OpenSQLite(ctx, filepath.Join(t.TempDir(), "repeat-ingestion.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	record := validRecord("RepeatCo")
+	record.PublishedAt = now.Add(-time.Hour)
+	adapter := fakeAdapter{
+		id: "source", accessMethod: "atom", records: []SourceRecord{record},
+		qualityPolicy: QualityPolicy{MaxAge: 24 * time.Hour, MaxFutureSkew: 15 * time.Minute},
+	}
+	cfg := []config.SourceConfig{{ID: "source", Active: true, AccessMethod: "atom"}}
+	var firstID string
+	for iteration := 0; iteration < 2; iteration++ {
+		service := NewService(NewRegistry(adapter), repository)
+		service.now = func() time.Time { return now }
+		result, err := service.Run(ctx, cfg)
+		if err != nil || len(result.Signals) != 1 || result.Sources[0].Stored != 1 {
+			t.Fatalf("ingestion iteration %d failed: result=%#v err=%v", iteration, result, err)
+		}
+		if iteration == 0 {
+			firstID = result.Signals[0].ID
+		} else if result.Signals[0].ID != firstID {
+			t.Fatalf("repeat changed stable signal id: first=%s second=%s", firstID, result.Signals[0].ID)
+		}
+	}
+	signals, err := repository.ListStartupSignals(ctx, now.Add(-2*time.Hour), now)
+	if err != nil || len(signals) != 1 || signals[0].ID != firstID {
+		t.Fatalf("repeat created physical signal duplicates: signals=%#v err=%v", signals, err)
 	}
 }
 
@@ -377,6 +464,7 @@ type fakeAdapter struct {
 	skipped             int
 	err                 error
 	fetch               func(context.Context) (AdapterFetchResult, error)
+	qualityPolicy       QualityPolicy
 }
 
 func (adapter fakeAdapter) Metadata() SourceMetadata {
@@ -385,6 +473,7 @@ func (adapter fakeAdapter) Metadata() SourceMetadata {
 		DisplayName:         adapter.id,
 		AccessMethod:        adapter.accessMethod,
 		RequiredCredentials: adapter.requiredCredentials,
+		QualityPolicy:       adapter.qualityPolicy,
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,13 +44,17 @@ type sourceAttemptGuard struct {
 }
 
 type SourceResult struct {
-	SourceID   string
-	Status     string
-	Fetched    int
-	Normalized int
-	Stored     int
-	Skipped    int
-	Message    string
+	SourceID         string
+	Status           string
+	Fetched          int
+	Normalized       int
+	Stored           int
+	Skipped          int
+	AdapterSkipped   int
+	QualityRejected  int
+	StoreFailed      int
+	RejectionReasons map[string]int
+	Message          string
 }
 
 type RunResult struct {
@@ -202,28 +207,42 @@ func (service Service) fetchSource(
 	}
 
 	sourceResult := SourceResult{
-		SourceID: source.Config.ID,
-		Status:   StatusOK,
-		Fetched:  len(adapterResult.Records) + adapterResult.Skipped,
-		Skipped:  adapterResult.Skipped,
+		SourceID:       source.Config.ID,
+		Status:         StatusOK,
+		Fetched:        len(adapterResult.Records) + adapterResult.Skipped,
+		Skipped:        adapterResult.Skipped,
+		AdapterSkipped: adapterResult.Skipped,
 	}
 	if adapterResult.Skipped > 0 {
 		sourceResult.Message = "one or more source items were skipped"
+		incrementRejection(&sourceResult, "adapter_rejected", adapterResult.Skipped)
 	}
 	var persistenceErrors []error
 
 	for _, record := range adapterResult.Records {
-		signal, err := NormalizeSignal(source.Config.ID, record)
+		signal, err := NormalizeSignalWithPolicy(
+			source.Config.ID,
+			record,
+			service.now(),
+			source.Metadata.QualityPolicy,
+		)
 		if err != nil {
 			sourceResult.Skipped++
-			sourceResult.Message = appendMessage(sourceResult.Message, err.Error())
+			sourceResult.QualityRejected++
+			reason := "invalid_record"
+			var qualityErr *QualityError
+			if errors.As(err, &qualityErr) {
+				reason = string(qualityErr.Reason)
+			}
+			incrementRejection(&sourceResult, reason, 1)
+			sourceResult.Message = appendMessage(sourceResult.Message, "one or more records failed quality policy")
 			continue
 		}
 		sourceResult.Normalized++
 		if service.store != nil {
 			if err := service.store.SaveStartupSignal(ctx, signal); err != nil {
-				sourceResult.Skipped++
-				sourceResult.Message = appendMessage(sourceResult.Message, fmt.Sprintf("store signal: %v", err))
+				sourceResult.StoreFailed++
+				sourceResult.Message = appendMessage(sourceResult.Message, "one or more normalized signals could not be persisted")
 				sourceResult.Status = StatusFailed
 				persistenceErrors = append(persistenceErrors, fmt.Errorf(
 					"store signal for source %s: %w", source.Config.ID, err,
@@ -245,6 +264,16 @@ func (service Service) fetchSource(
 	return sourceResult, errors.Join(persistenceErrors...)
 }
 
+func incrementRejection(result *SourceResult, reason string, count int) {
+	if count <= 0 {
+		return
+	}
+	if result.RejectionReasons == nil {
+		result.RejectionReasons = make(map[string]int)
+	}
+	result.RejectionReasons[reason] += count
+}
+
 func (service Service) saveHealth(ctx context.Context, sourceID, status, message string) error {
 	if service.store == nil {
 		return nil
@@ -263,6 +292,11 @@ func (service Service) saveHealth(ctx context.Context, sourceID, status, message
 func appendMessage(existing, next string) string {
 	if existing == "" {
 		return next
+	}
+	for _, message := range strings.Split(existing, "; ") {
+		if message == next {
+			return existing
+		}
 	}
 	return existing + "; " + next
 }

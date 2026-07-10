@@ -29,6 +29,12 @@ type SourceMetadata struct {
 	FetchCadence        string
 	RateLimit           string
 	Tags                []string
+	QualityPolicy       QualityPolicy
+}
+
+type QualityPolicy struct {
+	MaxAge        time.Duration
+	MaxFutureSkew time.Duration
 }
 
 type SourceRecord struct {

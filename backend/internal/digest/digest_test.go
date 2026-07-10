@@ -31,12 +31,13 @@ func TestGenerateDeduplicatesByCanonicalURLAndPreservesAttribution(t *testing.T)
 	}
 }
 
-func TestGenerateUsesConservativeFallbackKeys(t *testing.T) {
+func TestGenerateDoesNotFuzzyMergeSimilarNames(t *testing.T) {
 	generator := Generator{}
 	request := Request{
+		DigestDate: "2026-07-09",
 		Signals: []storage.StartupSignal{
-			signal("1", "SameName", "", "a", "https://source/a", "launch"),
-			signal("2", "SameName", "", "b", "https://source/b", "launch"),
+			signal("1", "SameName Labs", "", "a", "https://source/a", "launch"),
+			signal("2", "SameName Lab", "", "b", "https://source/b", "launch"),
 		},
 	}
 
@@ -44,6 +45,98 @@ func TestGenerateUsesConservativeFallbackKeys(t *testing.T) {
 
 	if len(digest.Items) != 2 {
 		t.Fatalf("expected fallback to keep distinct source URLs separate, got %#v", digest.Items)
+	}
+}
+
+func TestGenerateMergesExactCrossSourceNameAndTrackingURLs(t *testing.T) {
+	request := Request{
+		DigestDate: "2026-07-09",
+		Signals: []storage.StartupSignal{
+			signal("1", "Northstar Robotics", "", "innovate-uk", "https://source.example/a", "funding"),
+			signal("2", " northstar   robotics ", "", "ukri", "https://source.example/b", "launch"),
+			signal("3", "Tracked Co", "https://tracked.example/?utm_source=a", "a", "https://source.example/c", "launch"),
+			signal("4", "Tracked Co", "https://TRACKED.example:443?gclid=b", "b", "https://source.example/d", "news"),
+		},
+	}
+	generated := (Generator{}).Generate(request)
+	if len(generated.Items) != 2 {
+		t.Fatalf("expected two logical startups, got %#v", generated.Items)
+	}
+	for _, item := range generated.Items {
+		if len(item.Sources) != 2 {
+			t.Fatalf("cross-source attribution was lost: %#v", item)
+		}
+	}
+}
+
+func TestGenerateRequiresStrongEvidenceForLegalSuffixAlias(t *testing.T) {
+	base := []storage.StartupSignal{
+		signal("1", "Acme Ltd", "", "a", "https://source.example/a", "funding"),
+		signal("2", "Acme Inc", "", "b", "https://source.example/b", "funding"),
+	}
+	withoutFunding := (Generator{}).Generate(Request{DigestDate: "2026-07-09", Signals: base})
+	if len(withoutFunding.Items) != 2 {
+		t.Fatalf("weak legal suffix alias merged different startups: %#v", withoutFunding.Items)
+	}
+	base[0].RawPayload = `{"funding":{"Amount":"8 million","Currency":"GBP"}}`
+	base[1].RawPayload = `{"funding":{"Amount":"8 million","Currency":"GBP"}}`
+	withFunding := (Generator{}).Generate(Request{DigestDate: "2026-07-09", Signals: base})
+	if len(withFunding.Items) != 1 || len(withFunding.Items[0].Sources) != 2 {
+		t.Fatalf("strong funding alias did not merge: %#v", withFunding.Items)
+	}
+}
+
+func TestGenerateCanonicalConflictCannotBeBridgedInAnyOrder(t *testing.T) {
+	signals := []storage.StartupSignal{
+		signal("a", "Atlas", "https://atlas-a.example", "a", "https://source.example/a", "launch"),
+		signal("b", "Atlas", "https://atlas-b.example", "b", "https://source.example/b", "launch"),
+		signal("u", "Atlas", "", "u", "https://source.example/u", "launch"),
+	}
+	var baseline []Item
+	for index, permutation := range signalPermutations(signals) {
+		items := (Generator{}).Generate(Request{DigestDate: "2026-07-09", Signals: permutation}).Items
+		if len(items) != 3 {
+			t.Fatalf("permutation %d bridged canonical collision: %#v", index, items)
+		}
+		if index == 0 {
+			baseline = items
+		} else if !reflect.DeepEqual(items, baseline) {
+			t.Fatalf("canonical collision depends on input order\nbase=%#v\ngot=%#v", baseline, items)
+		}
+	}
+}
+
+func TestGenerateMergeIsNewestFirstAndOrderIndependent(t *testing.T) {
+	baseTime := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
+	newer := signal("new", "Acme", "https://acme.example", "new", "https://source.example/new", "launch")
+	newer.PublishedAt = baseTime.Add(time.Hour)
+	newer.Description = "Newest description"
+	newer.Region = "EU"
+	newer.RawPayload = `{"categories":["SaaS"],"funding":{"Round":"Seed","Investors":["Zulu"]}}`
+	older := signal("old", "ACME", "https://acme.example/", "old", "https://source.example/old", "funding")
+	older.PublishedAt = baseTime
+	older.Description = "Older description"
+	older.Region = "US"
+	older.RawPayload = `{"categories":["AI"],"funding":{"Round":"Seed","Amount":"8 million","Currency":"GBP","Investors":["Alpha"]}}`
+
+	var baseline []Item
+	for index, permutation := range signalPermutations([]storage.StartupSignal{newer, older}) {
+		items := (Generator{}).Generate(Request{DigestDate: "2026-07-09", Signals: permutation}).Items
+		if len(items) != 1 {
+			t.Fatalf("expected one item: %#v", items)
+		}
+		item := items[0]
+		if item.Description != "Newest description" || item.Region != "EU" ||
+			item.Funding.Round != "Seed" || item.Funding.Amount != "8 million" || item.Funding.Currency != "GBP" ||
+			!reflect.DeepEqual(item.Categories, []string{"AI", "SaaS"}) ||
+			!reflect.DeepEqual(item.Funding.Investors, []string{"Alpha", "Zulu"}) {
+			t.Fatalf("merged evidence is incomplete or mixed: %#v", item)
+		}
+		if index == 0 {
+			baseline = items
+		} else if !reflect.DeepEqual(items, baseline) {
+			t.Fatalf("merge depends on input order\nbase=%#v\ngot=%#v", baseline, items)
+		}
 	}
 }
 
@@ -381,6 +474,25 @@ func signalWithPayload(id, name, signalType, sourceID, rawPayload string) storag
 	item := signal(id, name, "https://"+strings.ToLower(name)+".example", sourceID, "https://source/"+id, signalType)
 	item.RawPayload = rawPayload
 	return item
+}
+
+func signalPermutations(signals []storage.StartupSignal) [][]storage.StartupSignal {
+	values := append([]storage.StartupSignal(nil), signals...)
+	var result [][]storage.StartupSignal
+	var visit func(int)
+	visit = func(index int) {
+		if index == len(values) {
+			result = append(result, append([]storage.StartupSignal(nil), values...))
+			return
+		}
+		for next := index; next < len(values); next++ {
+			values[index], values[next] = values[next], values[index]
+			visit(index + 1)
+			values[index], values[next] = values[next], values[index]
+		}
+	}
+	visit(0)
+	return result
 }
 
 func now() time.Time {
