@@ -1,6 +1,7 @@
 package digest
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -60,6 +61,44 @@ func TestGenerateRanksCategoryAndFundingMatchesHigher(t *testing.T) {
 
 	if digest.Items[0].StartupName != "FundedAI" {
 		t.Fatalf("expected category/funding match to rank first, got %#v", digest.Items)
+	}
+}
+
+func TestGenerateEnforcesProductItemLimit(t *testing.T) {
+	signals := make([]storage.StartupSignal, 0, 12)
+	for index := 1; index <= 12; index++ {
+		name := fmt.Sprintf("Startup%02d", index)
+		signals = append(signals, signal(
+			fmt.Sprintf("%d", index),
+			name,
+			"https://"+strings.ToLower(name)+".example",
+			"rss",
+			fmt.Sprintf("https://source/%d", index),
+			"launch",
+		))
+	}
+
+	tests := []struct {
+		name     string
+		maxItems int
+		want     int
+	}{
+		{name: "negative uses default", maxItems: -1, want: 10},
+		{name: "default", maxItems: 0, want: 10},
+		{name: "first above maximum", maxItems: 11, want: 10},
+		{name: "legacy above maximum", maxItems: 20, want: 10},
+		{name: "custom smaller limit", maxItems: 7, want: 7},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			digest := (Generator{}).Generate(Request{
+				Signals:     signals,
+				Preferences: storage.Preferences{MaxItems: test.maxItems},
+			})
+			if len(digest.Items) != test.want {
+				t.Fatalf("max_items=%d: expected %d items, got %d", test.maxItems, test.want, len(digest.Items))
+			}
+		})
 	}
 }
 

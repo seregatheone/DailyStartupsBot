@@ -478,8 +478,11 @@ func patchPreferences(current storage.Preferences, patch v1.PreferencesPatchRequ
 	if fields["timezone"] || patch.Timezone != "" {
 		current.Timezone = patch.Timezone
 	}
-	if fields["max_items"] || patch.MaxItems != 0 {
-		current.MaxItems = patch.MaxItems
+	if fields["max_items"] || patch.MaxItems != nil {
+		current.MaxItems = 0
+		if patch.MaxItems != nil {
+			current.MaxItems = *patch.MaxItems
+		}
 	}
 	return current
 }
@@ -491,8 +494,8 @@ func validatePreferences(preferences storage.Preferences) error {
 	if _, err := time.LoadLocation(preferences.Timezone); err != nil {
 		return fmt.Errorf("Некорректный часовой пояс")
 	}
-	if preferences.MaxItems < 1 || preferences.MaxItems > 20 {
-		return fmt.Errorf("max_items должен быть в диапазоне от 1 до 20")
+	if preferences.MaxItems < 1 || preferences.MaxItems > digest.MaximumItemLimit {
+		return fmt.Errorf("max_items должен быть в диапазоне от 1 до %d", digest.MaximumItemLimit)
 	}
 	return nil
 }

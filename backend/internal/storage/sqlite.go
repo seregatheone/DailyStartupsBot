@@ -71,7 +71,22 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 			return fmt.Errorf("apply sqlite migration: %w", err)
 		}
 	}
-	return repo.ensureDeliveryNextAttemptColumn(ctx)
+	if err := repo.ensureDeliveryNextAttemptColumn(ctx); err != nil {
+		return err
+	}
+	return repo.normalizePreferenceItemLimits(ctx)
+}
+
+func (repo *SQLiteRepository) normalizePreferenceItemLimits(ctx context.Context) error {
+	_, err := repo.db.ExecContext(ctx, `
+UPDATE subscriber_preferences
+SET max_items = ?
+WHERE max_items < 1 OR max_items > ?
+`, MaximumDigestItems, MaximumDigestItems)
+	if err != nil {
+		return fmt.Errorf("normalize preference item limits: %w", err)
+	}
+	return nil
 }
 
 func (repo *SQLiteRepository) ensureDeliveryNextAttemptColumn(ctx context.Context) error {
@@ -125,6 +140,7 @@ func (repo *SQLiteRepository) SaveSubscription(
 	if defaults.TelegramID != subscriber.TelegramID {
 		return Subscriber{}, fmt.Errorf("subscription preferences telegram id mismatch")
 	}
+	defaults.MaxItems = normalizeMaxItems(defaults.MaxItems)
 	regions, err := marshalStrings(defaults.Regions)
 	if err != nil {
 		return Subscriber{}, err
@@ -197,6 +213,7 @@ WHERE telegram_id = ?
 }
 
 func (repo *SQLiteRepository) SavePreferences(ctx context.Context, preferences Preferences) error {
+	preferences.MaxItems = normalizeMaxItems(preferences.MaxItems)
 	regions, err := marshalStrings(preferences.Regions)
 	if err != nil {
 		return err

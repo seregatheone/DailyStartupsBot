@@ -21,6 +21,9 @@ func (generator Generator) Generate(request Request) Digest {
 	if limit <= 0 {
 		limit = DefaultItemLimit
 	}
+	if limit > MaximumItemLimit {
+		limit = MaximumItemLimit
+	}
 	if len(items) > limit {
 		items = items[:limit]
 	}

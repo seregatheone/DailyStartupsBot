@@ -81,6 +81,65 @@ func TestSQLiteRepositoryPersistsStateAcrossReinitialization(t *testing.T) {
 	assertEqual(t, []DeliveryAttempt{attempt}, gotAttempts)
 }
 
+func TestSQLiteRepositoryNormalizesPreferenceItemLimit(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "legacy-preferences.db")
+	repo, err := OpenSQLite(ctx, dbPath)
+	must(t, err)
+
+	values := map[int64]int{
+		1: 1,
+		2: 7,
+		3: 10,
+		4: 11,
+		5: 20,
+		6: 0,
+		7: -1,
+	}
+	for telegramID, maxItems := range values {
+		must(t, repo.SaveSubscriber(ctx, Subscriber{
+			TelegramID: telegramID,
+			Active:     true,
+			CreatedAt:  time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC),
+		}))
+		_, err := repo.db.ExecContext(ctx, `
+INSERT INTO subscriber_preferences (telegram_id, regions_json, categories_json, delivery_time, timezone, max_items)
+VALUES (?, '[]', '[]', '09:00', 'UTC', ?)
+`, telegramID, maxItems)
+		must(t, err)
+	}
+	must(t, repo.Close())
+
+	for range 2 {
+		repo, err = OpenSQLite(ctx, dbPath)
+		must(t, err)
+		for telegramID, original := range values {
+			preferences, err := repo.GetPreferences(ctx, telegramID)
+			must(t, err)
+			want := original
+			if want < 1 || want > 10 {
+				want = 10
+			}
+			if preferences.MaxItems != want {
+				t.Fatalf("telegram_id=%d: expected max_items=%d, got %d", telegramID, want, preferences.MaxItems)
+			}
+		}
+		must(t, repo.Close())
+	}
+
+	repo, err = OpenSQLite(ctx, dbPath)
+	must(t, err)
+	defer repo.Close()
+	must(t, repo.SavePreferences(ctx, Preferences{
+		TelegramID: 1, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 11,
+	}))
+	preferences, err := repo.GetPreferences(ctx, 1)
+	must(t, err)
+	if preferences.MaxItems != 10 {
+		t.Fatalf("new internal write was not normalized: %#v", preferences)
+	}
+}
+
 func TestSaveSubscriptionRollsBackWhenDefaultPreferencesFail(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)

@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const MaximumDigestItems = 10
+
 var (
 	ErrDeliveryTerminal = errors.New("delivery is already terminal")
 	ErrDeliveryConflict = errors.New("delivery transition conflicts with current state")
@@ -24,6 +26,13 @@ type Preferences struct {
 	DeliveryTime string
 	Timezone     string
 	MaxItems     int
+}
+
+func normalizeMaxItems(value int) int {
+	if value < 1 || value > MaximumDigestItems {
+		return MaximumDigestItems
+	}
+	return value
 }
 
 type SourceHealth struct {
