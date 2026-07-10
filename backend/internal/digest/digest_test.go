@@ -1,6 +1,7 @@
 package digest
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -81,8 +82,75 @@ func TestRenderOmitsUnknownFundingFields(t *testing.T) {
 	}
 }
 
+func TestRenderUsesRussianVisualHierarchyAndEscapesSourceData(t *testing.T) {
+	generator := Generator{}
+	digest := Digest{
+		Date:     "2026-07-10",
+		Timezone: "Europe/Moscow",
+		Items: []Item{{
+			StartupName: "Acme & <AI>",
+			Description: "Помогает командам <быстрее>",
+			SignalType:  "launch",
+			Region:      "EU",
+			Categories:  []string{"AI", "SaaS"},
+			Funding: FundingInfo{
+				Round:     "Seed",
+				Amount:    "5000000",
+				Currency:  "USD",
+				Investors: []string{"Northwind"},
+			},
+			Sources: []SourceAttribution{{
+				SourceID:  "rss & news",
+				SourceURL: "https://source.example/acme?a=1&b=2",
+			}},
+		}},
+	}
+
+	text := generator.RenderMessages(digest)[0].Text
+
+	want := []string{
+		"🚀 <b>Стартапы дня</b>",
+		"<i>10 июля 2026 · Europe/Moscow</i>",
+		"1. <b>Acme &amp; &lt;AI&gt;</b>",
+		"<i>Помогает командам &lt;быстрее&gt;</i>",
+		"📣 Сигнал: запуск",
+		"🌍 Регион: EU",
+		"🏷 Категории: AI, SaaS",
+		"💰 Финансирование: Seed, 5000000 USD",
+		"👥 Инвесторы: Northwind",
+		`🔗 Источники: <a href="https://source.example/acme?a=1&amp;b=2">rss &amp; news</a>`,
+	}
+	for _, expected := range want {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in rendered digest:\n%s", expected, text)
+		}
+	}
+	if strings.Contains(text, "Daily startup digest") || strings.Contains(text, "2026-07-10") ||
+		strings.Contains(text, "<быстрее>") {
+		t.Fatalf("render contains legacy or unescaped text: %s", text)
+	}
+}
+
+func TestPreviewAndDeliveryUseTheSameRenderer(t *testing.T) {
+	generator := Generator{}
+	request := Request{
+		DigestDate: "2026-07-10",
+		Timezone:   "Europe/Moscow",
+		Signals: []storage.StartupSignal{
+			signal("1", "Acme AI", "https://acme.example", "rss", "https://source/a", "news"),
+		},
+	}
+
+	preview := generator.PreviewResponse(request).Messages
+	delivery := generator.DeliveryMessages(request)
+
+	if !reflect.DeepEqual(preview, delivery) {
+		t.Fatalf("preview and delivery diverged: preview=%#v delivery=%#v", preview, delivery)
+	}
+}
+
 func TestRenderAppliesItemLimitAndSplitsMessages(t *testing.T) {
-	generator := Generator{MessageLimit: 180}
+	generator := Generator{MessageLimit: 120}
 	request := Request{
 		DigestDate:  "2026-07-09",
 		Preferences: storage.Preferences{MaxItems: 2},
@@ -105,6 +173,14 @@ func TestRenderAppliesItemLimitAndSplitsMessages(t *testing.T) {
 	if len(messages) < 2 {
 		t.Fatalf("expected low message limit to split messages, got %#v", messages)
 	}
+	for _, message := range messages {
+		if len(message.Text) > generator.MessageLimit {
+			t.Fatalf("message exceeds configured limit: %d > %d", len(message.Text), generator.MessageLimit)
+		}
+		if !strings.Contains(message.Text, "🚀 <b>Стартапы дня</b>") {
+			t.Fatalf("split message lost digest header: %s", message.Text)
+		}
+	}
 }
 
 func TestPreviewResponseReturnsEmptyState(t *testing.T) {
@@ -115,8 +191,23 @@ func TestPreviewResponseReturnsEmptyState(t *testing.T) {
 	if !response.Empty {
 		t.Fatalf("expected empty preview")
 	}
-	if !strings.Contains(response.Messages[0].Text, "No matching startup signals") {
+	if !strings.Contains(response.Messages[0].Text, "Подходящих стартапов за этот день не найдено") ||
+		!strings.Contains(response.Messages[0].Text, "9 июля 2026") {
 		t.Fatalf("unexpected empty state: %#v", response.Messages)
+	}
+}
+
+func TestEmptyStateHonorsMessageLimit(t *testing.T) {
+	generator := Generator{MessageLimit: 64}
+
+	messages := generator.RenderMessages(Digest{
+		Date:     "2026-07-10",
+		Timezone: "Europe/Moscow",
+		Empty:    true,
+	})
+
+	if len(messages) != 1 || len(messages[0].Text) > generator.MessageLimit {
+		t.Fatalf("empty state exceeds configured limit: %#v", messages)
 	}
 }
 
