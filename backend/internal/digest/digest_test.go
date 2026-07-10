@@ -438,6 +438,26 @@ func TestRenderApprovedSourcesUsesPublisherAndOGLAttribution(t *testing.T) {
 	}
 }
 
+func TestRenderShowHNUsesSourceSpecificAttribution(t *testing.T) {
+	text := (Generator{}).RenderMessages(Digest{
+		Date:     "2026-07-10",
+		Timezone: "UTC",
+		Items: []Item{{
+			StartupName: "Runloom",
+			Sources: []SourceAttribution{{
+				SourceID:  "hacker-news-show",
+				SourceURL: "https://news.ycombinator.com/item?id=501",
+			}},
+		}},
+	})[0].Text
+
+	if !strings.Contains(text, `<a href="https://news.ycombinator.com/item?id=501">Hacker News Show HN</a>`) ||
+		!strings.Contains(text, `href="https://github.com/HackerNews/API">HN API</a> · публичная публикация`) ||
+		strings.Contains(text, "OGL v3.0") {
+		t.Fatalf("Show HN attribution is incorrect:\n%s", text)
+	}
+}
+
 func TestStoredDeliveryMessagesPreservesApprovedAttribution(t *testing.T) {
 	messages := (Generator{}).StoredDeliveryMessages(
 		storage.DigestRun{DigestDate: "2026-07-10", Timezone: "UTC"},

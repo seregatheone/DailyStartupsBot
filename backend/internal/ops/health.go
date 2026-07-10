@@ -53,7 +53,8 @@ func HealthFromDryRun(now time.Time, result ingestion.RunResult) HealthSummary {
 			RejectionReasons: cloneCounts(source.RejectionReasons),
 			Message:          source.Message,
 		})
-		if source.Status == ingestion.StatusFailed || source.Status == ingestion.StatusConfigError {
+		if source.Status == ingestion.StatusFailed || source.Status == ingestion.StatusConfigError ||
+			source.Status == ingestion.StatusZeroYield {
 			status = "degraded"
 			failures = append(failures, FailureSummary{
 				OccurredAt: now,

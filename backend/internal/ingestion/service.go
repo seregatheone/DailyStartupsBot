@@ -19,7 +19,9 @@ const (
 	StatusFetching     = "fetching"
 	StatusSkipped      = "skipped"
 	StatusConfigError  = "config_error"
+	StatusZeroYield    = "zero_yield"
 	sourceFetchFailure = "source fetch failed"
+	zeroYieldMessage   = "source produced no usable records"
 )
 
 type SignalStore interface {
@@ -255,6 +257,10 @@ func (service Service) fetchSource(
 	}
 
 	healthMessage := ""
+	if sourceResult.Status == StatusOK && sourceResult.Fetched > 0 && sourceResult.Normalized == 0 {
+		sourceResult.Status = StatusZeroYield
+		healthMessage = zeroYieldMessage
+	}
 	if len(persistenceErrors) > 0 {
 		healthMessage = "one or more normalized signals could not be persisted"
 	}

@@ -168,6 +168,83 @@ func TestServiceAccountsForAdapterLevelSkippedItems(t *testing.T) {
 	}
 }
 
+func TestServiceClassifiesOnlyNonEmptyZeroNormalizationAsZeroYield(t *testing.T) {
+	tests := []struct {
+		name            string
+		records         []SourceRecord
+		skipped         int
+		wantStatus      string
+		wantFetched     int
+		wantNormalized  int
+		wantAdapterSkip int
+		wantQualitySkip int
+	}{
+		{
+			name:            "adapter rejects every item",
+			skipped:         2,
+			wantStatus:      StatusZeroYield,
+			wantFetched:     2,
+			wantAdapterSkip: 2,
+		},
+		{
+			name:            "quality rejects every record",
+			records:         []SourceRecord{{}},
+			wantStatus:      StatusZeroYield,
+			wantFetched:     1,
+			wantQualitySkip: 1,
+		},
+		{
+			name:       "empty source remains healthy",
+			wantStatus: StatusOK,
+		},
+		{
+			name:            "partial yield remains healthy",
+			records:         []SourceRecord{validRecord("ValidCo")},
+			skipped:         1,
+			wantStatus:      StatusOK,
+			wantFetched:     2,
+			wantNormalized:  1,
+			wantAdapterSkip: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &memoryStore{}
+			service := NewService(NewRegistry(fakeAdapter{
+				id: "source", accessMethod: "api", records: test.records, skipped: test.skipped,
+			}), store)
+
+			result, err := service.Run(context.Background(), []config.SourceConfig{{
+				ID: "source", Active: true, AccessMethod: "api",
+			}})
+			if err != nil {
+				t.Fatalf("run ingestion: %v", err)
+			}
+			if len(result.Sources) != 1 {
+				t.Fatalf("unexpected source results: %#v", result.Sources)
+			}
+			source := result.Sources[0]
+			if source.Status != test.wantStatus || source.Fetched != test.wantFetched ||
+				source.Normalized != test.wantNormalized || source.AdapterSkipped != test.wantAdapterSkip ||
+				source.QualityRejected != test.wantQualitySkip {
+				t.Fatalf("unexpected source result: %#v", source)
+			}
+			health := store.health["source"]
+			if health.Status != test.wantStatus {
+				t.Fatalf("unexpected persisted health: %#v", health)
+			}
+			wantHealthMessage := ""
+			if test.wantStatus == StatusZeroYield {
+				wantHealthMessage = zeroYieldMessage
+			}
+			if health.LastError != wantHealthMessage {
+				t.Fatalf("unexpected persisted health message: %q", health.LastError)
+			}
+		})
+	}
+}
+
 func TestServiceReportsBoundedQualityRejectionAccounting(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	valid := validRecord("ValidCo")

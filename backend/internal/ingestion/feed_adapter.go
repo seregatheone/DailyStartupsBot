@@ -36,6 +36,7 @@ const (
 	FeedErrorTooManyItems   FeedErrorKind = "too_many_items"
 	FeedErrorInvalidXML     FeedErrorKind = "invalid_xml"
 	FeedErrorUnsupportedXML FeedErrorKind = "unsupported_xml"
+	FeedErrorInvalidJSON    FeedErrorKind = "invalid_json"
 )
 
 type FeedError struct {
@@ -50,7 +51,7 @@ func (err *FeedError) safeKind() FeedErrorKind {
 	switch err.Kind {
 	case FeedErrorNetwork, FeedErrorTimeout, FeedErrorRedirect, FeedErrorStatus,
 		FeedErrorContentType, FeedErrorResponseSize, FeedErrorTooManyItems,
-		FeedErrorInvalidXML, FeedErrorUnsupportedXML:
+		FeedErrorInvalidXML, FeedErrorUnsupportedXML, FeedErrorInvalidJSON:
 		return err.Kind
 	default:
 		return FeedErrorNetwork

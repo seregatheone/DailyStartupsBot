@@ -15,7 +15,7 @@ The service SHALL load source definitions from runtime configuration and SHALL r
 #### Scenario: Live defaults are loaded
 
 - **WHEN** `DAILY_STARTUPS_DRY_RUN=false` is explicitly configured without source JSON
-- **THEN** the three approved public sources are active and `sample-public` is absent
+- **THEN** the three GOV.UK sources and the required Show HN launch source are active and `sample-public` is absent
 
 #### Scenario: Sample is configured live
 
@@ -114,17 +114,17 @@ The system SHALL isolate source fetch failures so one failing source does not st
 
 ### Requirement: Approved public source catalog
 
-The repository SHALL maintain a reviewed, machine-verifiable catalog of at least three publisher-advertised public startup feeds with verified reuse permission before enabling their network adapters.
+The repository SHALL maintain a reviewed, machine-verifiable catalog of at least three publisher-advertised public startup sources with verified access/reuse evidence before enabling their network adapters.
 
 #### Scenario: Source is approved
 
 - **WHEN** a source enters the catalog
-- **THEN** it records publisher evidence, HTTPS feed URL, terms/reuse evidence, authentication needs, cadence, timeout, response/item limits, rate limit, expected freshness, fixture and attribution policy
+- **THEN** it records publisher evidence, HTTPS endpoint URL, terms/reuse evidence, authentication needs, cadence, timeout, response/item limits, rate limit, expected freshness, fixture and source-specific attribution policy
 
 #### Scenario: Catalog verification runs
 
 - **WHEN** repository tests execute
-- **THEN** at least three unique approved sources and their synthetic source-shaped fixtures are validated without network, credentials, new dependency or external service
+- **THEN** at least three unique approved sources and their synthetic source-shaped fixtures are validated without network, credentials or new dependency
 
 ### Requirement: Explicit feed-to-record mapping
 
@@ -151,12 +151,12 @@ Cataloged sources SHALL fail independently and SHALL NOT fall back to unapproved
 
 #### Scenario: Fetch or format fails
 
-- **WHEN** network, timeout, size, content type, XML or required-field validation fails
+- **WHEN** network, timeout, size, content type, XML, JSON or required-field validation fails
 - **THEN** only that source becomes degraded, other sources continue and retry waits for bounded cadence/backoff
 
 #### Scenario: Publisher access changes
 
-- **WHEN** feed discovery is withdrawn, authentication/prohibition appears, mapping becomes unsafe or attribution cannot be preserved
+- **WHEN** endpoint discovery is withdrawn, authentication/prohibition appears, mapping becomes unsafe or attribution cannot be preserved
 - **THEN** new fetch and public display are disabled while historical source metadata may remain for internal audit
 
 #### Scenario: Breaking format is accepted
@@ -243,7 +243,7 @@ The adapter SHALL normalize untrusted feed text and URLs before returning record
 
 ### Requirement: Adapter result accounting
 
-Every source adapter SHALL return non-negative complete accounting and the ingestion service SHALL expose adapter skips, quality rejections, store failures and bounded rejection reasons separately.
+Every source adapter SHALL return non-negative complete accounting and the ingestion service SHALL expose adapter skips, quality rejections, store failures, zero useful yield and bounded rejection reasons separately.
 
 #### Scenario: Adapter result is counted
 
@@ -255,6 +255,16 @@ Every source adapter SHALL return non-negative complete accounting and the inges
 - **WHEN** one or more returned records fail quality policy
 - **THEN** source quality/skipped counts increase and a stable reason-to-count map explains every quality rejection while adapter rejection remains separately counted without raw content
 
+#### Scenario: Non-empty source has zero useful yield
+
+- **WHEN** a source fetches at least one item and normalizes none without a fatal fetch or persistence error
+- **THEN** its source status is `zero_yield`, the cycle remains isolated and the diagnostic contains no raw payload content
+
+#### Scenario: Empty or partially useful source completes
+
+- **WHEN** a valid source is genuinely empty or normalizes at least one fetched item
+- **THEN** zero-yield classification is not applied
+
 ### Requirement: Persisted preview source
 
 The live preview endpoint SHALL build its digest from stored signals for the requested local calendar date and SHALL NOT invoke source adapters.
@@ -264,14 +274,14 @@ The live preview endpoint SHALL build its digest from stored signals for the req
 - **WHEN** a subscribed user requests a preview for a valid date/timezone
 - **THEN** stored signals in that date window are filtered/rendered and zero outbound source requests occur
 
-### Requirement: Licensed source attribution
+### Requirement: Source-specific attribution
 
-Approved source attribution SHALL retain publisher display name, exact source URL and an accessible OGL v3 normalized-summary notice in both generated and stored delivery messages.
+Approved source attribution SHALL retain publisher display name, exact source URL and the catalog-owned attribution label, terms URL and notice in both generated and stored delivery messages.
 
 #### Scenario: Approved signal is rendered
 
 - **WHEN** its digest item is generated or restored from an immutable snapshot
-- **THEN** the publisher name links to the original GOV.UK entry and the OGL v3 normalized-summary notice is present
+- **THEN** the publisher name links to the original source, GOV.UK signals retain the OGL v3 normalized-summary notice and Show HN signals use the HN API public publication notice without claiming OGL
 
 ### Requirement: Bounded ingestion quality gate
 
@@ -291,3 +301,27 @@ The ingestion service SHALL reject stale, future, invalid and incomplete records
 
 - **WHEN** source/canonical identity is unsafe or signal type is unsupported
 - **THEN** the record is skipped with a bounded invalid reason and raw URL/content is not included in result or health text
+
+### Requirement: Safe public JSON launch adapter
+
+The system SHALL ingest launch signals from the official Hacker News `showstories` JSON API through bounded HTTPS requests without credentials, HTML scraping or third-party dependencies.
+
+#### Scenario: Show HN launch is admitted
+
+- **WHEN** a live non-deleted story has a strict `Show HN:` title with one safe product name and optional bounded tagline
+- **THEN** the adapter emits one launch record with the HN discussion attribution, publication time, optional HTTPS product URL and no inferred region or funding
+
+#### Scenario: Show HN item is ambiguous or unsafe
+
+- **WHEN** an item is deleted, dead, not a story, lacks valid time/title, uses an ambiguous sentence-like name or exposes only an unsafe product URL
+- **THEN** the item is skipped or its optional product URL remains empty without storing user, comment, story text or raw JSON fields
+
+#### Scenario: HN network surface is bounded
+
+- **WHEN** the adapter fetches the story list and item details
+- **THEN** it allows only the configured HTTPS API host and exact numeric item paths while bounding redirects, body size, selected item count, per-request time and total fetch time
+
+#### Scenario: HN list or item transport fails
+
+- **WHEN** the list contract fails or all selected item requests fail at transport/protocol level
+- **THEN** the source reports a stable sanitized fetch failure while failures isolated to individual items are counted as skips when other items remain usable
