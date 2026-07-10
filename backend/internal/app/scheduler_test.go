@@ -303,8 +303,10 @@ func (adapter schedulerAdapter) Metadata() ingestion.SourceMetadata {
 func (adapter schedulerAdapter) Fetch(
 	context.Context,
 	config.SourceConfig,
-) ([]ingestion.SourceRecord, error) {
-	return append([]ingestion.SourceRecord(nil), adapter.records...), adapter.err
+) (ingestion.AdapterFetchResult, error) {
+	return ingestion.AdapterFetchResult{
+		Records: append([]ingestion.SourceRecord(nil), adapter.records...),
+	}, adapter.err
 }
 
 type flakyScheduledRepository struct {

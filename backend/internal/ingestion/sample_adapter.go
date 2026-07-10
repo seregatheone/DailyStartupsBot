@@ -40,6 +40,6 @@ func (adapter SamplePublicAdapter) Metadata() SourceMetadata {
 	}
 }
 
-func (adapter SamplePublicAdapter) Fetch(context.Context, config.SourceConfig) ([]SourceRecord, error) {
-	return append([]SourceRecord(nil), adapter.records...), nil
+func (adapter SamplePublicAdapter) Fetch(context.Context, config.SourceConfig) (AdapterFetchResult, error) {
+	return AdapterFetchResult{Records: append([]SourceRecord(nil), adapter.records...)}, nil
 }
