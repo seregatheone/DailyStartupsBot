@@ -122,7 +122,7 @@ func (server *Server) subscribe(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	if body.TelegramID <= 0 {
-		writeError(writer, http.StatusBadRequest, "telegram_id must be positive")
+		writeError(writer, http.StatusBadRequest, "telegram_id должен быть положительным числом")
 		return
 	}
 
@@ -150,13 +150,13 @@ func (server *Server) unsubscribe(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	if body.TelegramID <= 0 {
-		writeError(writer, http.StatusBadRequest, "telegram_id must be positive")
+		writeError(writer, http.StatusBadRequest, "telegram_id должен быть положительным числом")
 		return
 	}
 
 	subscriber, err := server.store.GetSubscriber(request.Context(), body.TelegramID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(writer, http.StatusNotFound, "subscriber not found")
+		writeError(writer, http.StatusNotFound, "Подписчик не найден")
 		return
 	}
 	if err != nil {
@@ -208,7 +208,7 @@ func (server *Server) preferences(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	if body.TelegramID != 0 && body.TelegramID != telegramID {
-		writeError(writer, http.StatusBadRequest, "telegram_id does not match request path")
+		writeError(writer, http.StatusBadRequest, "telegram_id не совпадает со значением в URL")
 		return
 	}
 
@@ -236,7 +236,7 @@ func (server *Server) preview(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	if body.TelegramID <= 0 {
-		writeError(writer, http.StatusBadRequest, "telegram_id must be positive")
+		writeError(writer, http.StatusBadRequest, "telegram_id должен быть положительным числом")
 		return
 	}
 	_, preferences, ok := server.subscriberState(writer, request, body.TelegramID)
@@ -250,14 +250,14 @@ func (server *Server) preview(writer http.ResponseWriter, request *http.Request)
 	}
 	location, err := time.LoadLocation(timezone)
 	if err != nil {
-		writeError(writer, http.StatusBadRequest, "timezone is invalid")
+		writeError(writer, http.StatusBadRequest, "Некорректный часовой пояс")
 		return
 	}
 	digestDate := body.Date
 	if digestDate == "" {
 		digestDate = server.now().In(location).Format("2006-01-02")
 	} else if _, err := time.Parse("2006-01-02", digestDate); err != nil {
-		writeError(writer, http.StatusBadRequest, "date must use YYYY-MM-DD format")
+		writeError(writer, http.StatusBadRequest, "Дата должна быть в формате YYYY-MM-DD")
 		return
 	}
 
@@ -309,7 +309,7 @@ func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.
 	rawDeliveryID := request.PathValue("delivery_id")
 	deliveryID := strings.TrimSpace(rawDeliveryID)
 	if deliveryID == "" || deliveryID != rawDeliveryID || len(deliveryID) > 256 {
-		writeError(writer, http.StatusBadRequest, "delivery_id is invalid")
+		writeError(writer, http.StatusBadRequest, "Некорректный delivery_id")
 		return
 	}
 
@@ -318,23 +318,23 @@ func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.
 		return
 	}
 	if body.DeliveryID == "" || body.DeliveryID != deliveryID {
-		writeError(writer, http.StatusBadRequest, "delivery_id does not match request path")
+		writeError(writer, http.StatusBadRequest, "delivery_id не совпадает со значением в URL")
 		return
 	}
 	if body.AttemptedAt.IsZero() {
-		writeError(writer, http.StatusBadRequest, "attempted_at is required")
+		writeError(writer, http.StatusBadRequest, "Поле attempted_at обязательно")
 		return
 	}
 	switch body.Status {
 	case "success", "failed", "blocked":
 	default:
-		writeError(writer, http.StatusBadRequest, "status must be success, failed, or blocked")
+		writeError(writer, http.StatusBadRequest, "status должен быть одним из значений: success, failed или blocked")
 		return
 	}
 
 	current, err := server.store.GetDelivery(request.Context(), deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(writer, http.StatusNotFound, "delivery not found")
+		writeError(writer, http.StatusNotFound, "Доставка не найдена")
 		return
 	}
 	if err != nil {
@@ -364,11 +364,11 @@ func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.
 		DeactivateSubscriber: decision.Inactive,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(writer, http.StatusNotFound, "delivery not found")
+		writeError(writer, http.StatusNotFound, "Доставка не найдена")
 		return
 	}
 	if errors.Is(err, storage.ErrDeliveryTerminal) || errors.Is(err, storage.ErrDeliveryConflict) {
-		writeError(writer, http.StatusConflict, "delivery state conflict")
+		writeError(writer, http.StatusConflict, "Состояние доставки изменилось, повторите запрос")
 		return
 	}
 	if err != nil {
@@ -417,7 +417,7 @@ func (server *Server) subscriberState(
 ) (storage.Subscriber, storage.Preferences, bool) {
 	subscriber, err := server.store.GetSubscriber(request.Context(), telegramID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeError(writer, http.StatusNotFound, "subscriber not found")
+		writeError(writer, http.StatusNotFound, "Подписчик не найден")
 		return storage.Subscriber{}, storage.Preferences{}, false
 	}
 	if err != nil {
@@ -486,13 +486,13 @@ func patchPreferences(current storage.Preferences, patch v1.PreferencesPatchRequ
 
 func validatePreferences(preferences storage.Preferences) error {
 	if _, err := time.Parse("15:04", preferences.DeliveryTime); err != nil {
-		return fmt.Errorf("delivery_time must use HH:MM format")
+		return fmt.Errorf("delivery_time должен быть в формате HH:MM")
 	}
 	if _, err := time.LoadLocation(preferences.Timezone); err != nil {
-		return fmt.Errorf("timezone is invalid")
+		return fmt.Errorf("Некорректный часовой пояс")
 	}
 	if preferences.MaxItems < 1 || preferences.MaxItems > 20 {
-		return fmt.Errorf("max_items must be between 1 and 20")
+		return fmt.Errorf("max_items должен быть в диапазоне от 1 до 20")
 	}
 	return nil
 }
@@ -501,7 +501,7 @@ func pathTelegramID(writer http.ResponseWriter, request *http.Request) (int64, b
 	raw := request.PathValue("telegram_id")
 	telegramID, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || telegramID <= 0 {
-		writeError(writer, http.StatusBadRequest, "telegram_id must be positive")
+		writeError(writer, http.StatusBadRequest, "telegram_id должен быть положительным числом")
 		return 0, false
 	}
 	return telegramID, true
@@ -530,18 +530,18 @@ func decodeJSON(writer http.ResponseWriter, request *http.Request, destination a
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid JSON request")
+		writeError(writer, http.StatusBadRequest, "Некорректный JSON-запрос")
 		return false
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeError(writer, http.StatusBadRequest, "invalid JSON request")
+		writeError(writer, http.StatusBadRequest, "Некорректный JSON-запрос")
 		return false
 	}
 	return true
 }
 
 func writeInternalError(writer http.ResponseWriter, _ error) {
-	writeError(writer, http.StatusInternalServerError, "internal server error")
+	writeError(writer, http.StatusInternalServerError, "Внутренняя ошибка сервера")
 }
 
 func writeError(writer http.ResponseWriter, status int, message string) {

@@ -134,16 +134,91 @@ END
 
 	testServer := httptest.NewServer(NewServer(config.Default(), repository))
 	defer testServer.Close()
-	requestJSONStatus(t, http.MethodPost, testServer.URL+"/v1/subscribers/subscribe", map[string]any{
+	message := requestJSONError(t, http.MethodPost, testServer.URL+"/v1/subscribers/subscribe", map[string]any{
 		"telegram_id": 77,
 		"username":    "partial",
 	}, http.StatusInternalServerError)
+	if message != "Внутренняя ошибка сервера" {
+		t.Fatalf("unexpected internal error message: %q", message)
+	}
 
 	response := requestJSON(t, http.MethodGet, testServer.URL+"/v1/subscribers/77/status", nil)
 	var status v1.SubscriberStatusResponse
 	decodeResponse(t, response, &status)
 	if status.Subscriber.Active {
 		t.Fatalf("failed subscribe left active subscriber: %#v", status)
+	}
+}
+
+func TestUserFacingAPIErrorsAreRussian(t *testing.T) {
+	repository, err := storage.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "backend.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+
+	testServer := httptest.NewServer(NewServer(config.Default(), repository))
+	defer testServer.Close()
+	response := requestJSON(t, http.MethodPost, testServer.URL+"/v1/subscribers/subscribe", map[string]any{
+		"telegram_id": 42,
+	})
+	response.Body.Close()
+
+	tests := []struct {
+		name           string
+		method         string
+		path           string
+		payload        any
+		expectedStatus int
+		expectedError  string
+	}{
+		{
+			name:           "invalid telegram id",
+			method:         http.MethodPost,
+			path:           "/v1/subscribers/subscribe",
+			payload:        map[string]any{"telegram_id": 0},
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "telegram_id должен быть положительным числом",
+		},
+		{
+			name:           "subscriber not found",
+			method:         http.MethodPost,
+			path:           "/v1/subscribers/unsubscribe",
+			payload:        map[string]any{"telegram_id": 999},
+			expectedStatus: http.StatusNotFound,
+			expectedError:  "Подписчик не найден",
+		},
+		{
+			name:           "invalid timezone",
+			method:         http.MethodPost,
+			path:           "/v1/digests/preview",
+			payload:        map[string]any{"telegram_id": 42, "timezone": "Mars/Phobos"},
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "Некорректный часовой пояс",
+		},
+		{
+			name:           "invalid preferences",
+			method:         http.MethodPatch,
+			path:           "/v1/subscribers/42/preferences",
+			payload:        map[string]any{"telegram_id": 42, "delivery_time": "99:99"},
+			expectedStatus: http.StatusBadRequest,
+			expectedError:  "delivery_time должен быть в формате HH:MM",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := requestJSONError(
+				t,
+				test.method,
+				testServer.URL+test.path,
+				test.payload,
+				test.expectedStatus,
+			)
+			if message != test.expectedError {
+				t.Fatalf("expected %q, got %q", test.expectedError, message)
+			}
+		})
 	}
 }
 
@@ -421,6 +496,13 @@ func TestRejectsTrailingJSONRequest(t *testing.T) {
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", response.StatusCode)
 	}
+	var payload map[string]string
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if payload["error"] != "Некорректный JSON-запрос" {
+		t.Fatalf("unexpected JSON error response: %#v", payload)
+	}
 }
 
 func deliveryTestServer(t *testing.T) (*storage.SQLiteRepository, *Server, *httptest.Server, time.Time) {
@@ -512,6 +594,11 @@ func requestJSON(t *testing.T, method, url string, payload any) *http.Response {
 
 func requestJSONStatus(t *testing.T, method, url string, payload any, expectedStatus int) {
 	t.Helper()
+	_ = requestJSONError(t, method, url, payload, expectedStatus)
+}
+
+func requestJSONError(t *testing.T, method, url string, payload any, expectedStatus int) string {
+	t.Helper()
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
@@ -536,6 +623,15 @@ func requestJSONStatus(t *testing.T, method, url string, payload any, expectedSt
 		data, _ := io.ReadAll(response.Body)
 		t.Fatalf("expected status %d, got %d: %s", expectedStatus, response.StatusCode, data)
 	}
+	var errorPayload map[string]string
+	if err := json.NewDecoder(response.Body).Decode(&errorPayload); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	message := errorPayload["error"]
+	if message == "" || len(errorPayload) != 1 {
+		t.Fatalf("unexpected error response shape: %#v", errorPayload)
+	}
+	return message
 }
 
 func decodeResponse(t *testing.T, response *http.Response, destination any) {

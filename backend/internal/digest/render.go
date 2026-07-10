@@ -5,6 +5,7 @@ import (
 	"html"
 	"sort"
 	"strings"
+	"time"
 
 	v1 "github.com/seregatheone/DailyStartupsBot/backend/internal/contracts/v1"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
@@ -55,19 +56,24 @@ func (generator Generator) RenderMessages(digest Digest) []v1.DigestMessage {
 	if limit <= 0 {
 		limit = DefaultMessageLength
 	}
+	header := renderDigestHeader(digest)
+	if len(header) > limit {
+		header = escapeAndTruncate(renderPlainDigestHeader(digest), limit)
+	}
 
 	if digest.Empty {
+		const emptyState = "Подходящих стартапов за этот день не найдено."
+		message := header + "\n\n" + emptyState
+		if len(message) > limit {
+			message = escapeAndTruncate(renderPlainDigestHeader(digest)+"\n\n"+emptyState, limit)
+		}
 		return []v1.DigestMessage{{
 			Sequence: 1,
-			Text:     fmt.Sprintf("No matching startup signals found for %s.", html.EscapeString(digest.Date)),
+			Text:     message,
 			ParseAs:  "HTML",
 		}}
 	}
 
-	header := fmt.Sprintf("<b>Daily startup digest</b> %s", html.EscapeString(digest.Date))
-	if len(header) > limit {
-		header = escapeAndTruncate("Daily startup digest "+digest.Date, limit)
-	}
 	maxBlockLength := limit - len(header) - 2
 	if maxBlockLength <= 0 {
 		return []v1.DigestMessage{{Sequence: 1, Text: header, ParseAs: "HTML"}}
@@ -97,6 +103,46 @@ func (generator Generator) RenderMessages(digest Digest) []v1.DigestMessage {
 		})
 	}
 	return rendered
+}
+
+func renderDigestHeader(digest Digest) string {
+	metadata := digestMetadata(digest)
+	if metadata == "" {
+		return "🚀 <b>Стартапы дня</b>"
+	}
+	return "🚀 <b>Стартапы дня</b>\n<i>" + html.EscapeString(metadata) + "</i>"
+}
+
+func renderPlainDigestHeader(digest Digest) string {
+	metadata := digestMetadata(digest)
+	if metadata == "" {
+		return "🚀 Стартапы дня"
+	}
+	return "🚀 Стартапы дня\n" + metadata
+}
+
+func digestMetadata(digest Digest) string {
+	var parts []string
+	if date := formatDigestDate(digest.Date); date != "" {
+		parts = append(parts, date)
+	}
+	if timezone := strings.TrimSpace(digest.Timezone); timezone != "" {
+		parts = append(parts, timezone)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatDigestDate(value string) string {
+	value = strings.TrimSpace(value)
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return value
+	}
+	months := [...]string{
+		"января", "февраля", "марта", "апреля", "мая", "июня",
+		"июля", "августа", "сентября", "октября", "ноября", "декабря",
+	}
+	return fmt.Sprintf("%d %s %d", parsed.Day(), months[parsed.Month()-1], parsed.Year())
 }
 
 func renderOversizedItem(index int, item Item, limit int) string {
@@ -135,7 +181,7 @@ func renderItem(index int, item Item) string {
 		fmt.Sprintf("%d. <b>%s</b>", index, html.EscapeString(item.StartupName)),
 	}
 	if item.Description != "" {
-		parts = append(parts, html.EscapeString(item.Description))
+		parts = append(parts, "<i>"+html.EscapeString(item.Description)+"</i>")
 	}
 	details := renderDetails(item)
 	if details != "" {
@@ -151,13 +197,13 @@ func renderItem(index int, item Item) string {
 func renderDetails(item Item) string {
 	var details []string
 	if item.SignalType != "" {
-		details = append(details, "signal: "+html.EscapeString(item.SignalType))
+		details = append(details, "📣 Сигнал: "+html.EscapeString(displaySignalType(item.SignalType)))
 	}
 	if item.Region != "" {
-		details = append(details, "region: "+html.EscapeString(item.Region))
+		details = append(details, "🌍 Регион: "+html.EscapeString(item.Region))
 	}
 	if len(item.Categories) > 0 {
-		details = append(details, "categories: "+html.EscapeString(strings.Join(item.Categories, ", ")))
+		details = append(details, "🏷 Категории: "+html.EscapeString(strings.Join(item.Categories, ", ")))
 	}
 	if funding := renderFunding(item.Funding); funding != "" {
 		details = append(details, funding)
@@ -165,7 +211,20 @@ func renderDetails(item Item) string {
 	if len(details) == 0 {
 		return ""
 	}
-	return strings.Join(details, " | ")
+	return strings.Join(details, "\n")
+}
+
+func displaySignalType(signalType string) string {
+	switch strings.ToLower(strings.TrimSpace(signalType)) {
+	case "launch":
+		return "запуск"
+	case "news":
+		return "новость"
+	case "funding":
+		return "финансирование"
+	default:
+		return strings.TrimSpace(signalType)
+	}
 }
 
 func renderFunding(funding FundingInfo) string {
@@ -180,13 +239,14 @@ func renderFunding(funding FundingInfo) string {
 		}
 		parts = append(parts, amount)
 	}
+	var lines []string
+	if len(parts) > 0 {
+		lines = append(lines, "💰 Финансирование: "+strings.Join(parts, ", "))
+	}
 	if len(funding.Investors) > 0 {
-		parts = append(parts, "investors: "+html.EscapeString(strings.Join(funding.Investors, ", ")))
+		lines = append(lines, "👥 Инвесторы: "+html.EscapeString(strings.Join(funding.Investors, ", ")))
 	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return "funding: " + strings.Join(parts, ", ")
+	return strings.Join(lines, "\n")
 }
 
 func renderAttribution(sources []SourceAttribution) string {
@@ -202,5 +262,5 @@ func renderAttribution(sources []SourceAttribution) string {
 		}
 		parts = append(parts, fmt.Sprintf(`<a href="%s">%s</a>`, html.EscapeString(source.SourceURL), label))
 	}
-	return "sources: " + strings.Join(parts, ", ")
+	return "🔗 Источники: " + strings.Join(parts, ", ")
 }
