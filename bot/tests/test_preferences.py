@@ -24,15 +24,15 @@ class PreferencesTest(unittest.TestCase):
             parse_preferences("/preferences time=25:99")
 
     def test_enforces_max_items_range(self) -> None:
-        for value in [1, 10]:
+        for value in [5, 10]:
             with self.subTest(value=value):
                 preferences = parse_preferences(f"/preferences max={value}")
                 self.assertEqual(preferences["max_items"], value)
 
-        for value in [0, 11]:
+        for value in [0, 1, 4, 11]:
             with self.subTest(value=value):
                 with self.assertRaisesRegex(
-                    PreferenceParseError, "Количество элементов должно быть от 1 до 10"
+                    PreferenceParseError, "Количество элементов должно быть от 5 до 10"
                 ):
                     parse_preferences(f"/preferences max={value}")
 

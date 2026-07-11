@@ -191,7 +191,7 @@ func TestPreferencesEnforceItemLimit(t *testing.T) {
 	response.Body.Close()
 	assertMaxItems(10)
 
-	for _, maxItems := range []int{0, 11} {
+	for _, maxItems := range []int{0, 1, 4, 11} {
 		t.Run(fmt.Sprintf("reject %d", maxItems), func(t *testing.T) {
 			message := requestJSONError(
 				t,
@@ -200,7 +200,7 @@ func TestPreferencesEnforceItemLimit(t *testing.T) {
 				map[string]any{"telegram_id": 42, "max_items": maxItems},
 				http.StatusBadRequest,
 			)
-			if message != "max_items должен быть в диапазоне от 1 до 10" {
+			if message != "max_items должен быть в диапазоне от 5 до 10" {
 				t.Fatalf("unexpected validation error: %q", message)
 			}
 			assertMaxItems(10)
@@ -209,10 +209,10 @@ func TestPreferencesEnforceItemLimit(t *testing.T) {
 
 	response = requestJSON(t, http.MethodPatch, testServer.URL+"/v1/subscribers/42/preferences", map[string]any{
 		"telegram_id": 42,
-		"max_items":   1,
+		"max_items":   5,
 	})
 	response.Body.Close()
-	assertMaxItems(1)
+	assertMaxItems(5)
 }
 
 func TestSubscribeFailureLeavesNoPartialActiveSubscriber(t *testing.T) {

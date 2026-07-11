@@ -143,16 +143,19 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(preferences["max_items"], 5)
         self.assertEqual(self.telegram.sent[0][1], "Настройки обновлены.")
 
-    def test_preferences_reject_max_above_ten_without_backend_call(self) -> None:
-        self.router.handle_update(update("/preferences max=11"))
+    def test_preferences_reject_max_outside_range_without_backend_call(self) -> None:
+        for value in [4, 11]:
+            with self.subTest(value=value):
+                self.router.handle_update(update(f"/preferences max={value}"))
 
-        self.assertEqual(self.backend.calls, [])
-        self.assertIn(
-            "Количество элементов должно быть от 1 до 10",
-            self.telegram.sent[0][1],
-        )
-        self.assertIn("Пример: /preferences", self.telegram.sent[0][1])
-        self.assertIn("max=7", self.telegram.sent[0][1])
+                self.assertEqual(self.backend.calls, [])
+                message = self.telegram.sent[-1][1]
+                self.assertIn(
+                    "Количество элементов должно быть от 5 до 10",
+                    message,
+                )
+                self.assertIn("Пример: /preferences", message)
+                self.assertIn("max=7", message)
 
     def test_unknown_command_uses_russian_help(self) -> None:
         self.router.handle_update(update("/unknown"))

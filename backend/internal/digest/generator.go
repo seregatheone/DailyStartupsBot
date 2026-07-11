@@ -13,11 +13,17 @@ type identifiedSignal struct {
 	identity ingestion.SignalIdentity
 }
 
+const firstPassItemsPerSource = 2
+
 func (generator Generator) Generate(request Request) Digest {
 	items := generator.groupSignals(request.Signals, request.Preferences, request.DigestDate)
+	candidateCount := len(items)
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].Score != items[j].Score {
 			return items[i].Score > items[j].Score
+		}
+		if !items[i].PublishedAt.Equal(items[j].PublishedAt) {
+			return items[i].PublishedAt.After(items[j].PublishedAt)
 		}
 		leftName := strings.ToLower(items[i].StartupName)
 		rightName := strings.ToLower(items[j].StartupName)
@@ -27,23 +33,101 @@ func (generator Generator) Generate(request Request) Digest {
 		return items[i].identity < items[j].identity
 	})
 
-	limit := request.Preferences.MaxItems
-	if limit <= 0 {
-		limit = DefaultItemLimit
-	}
-	if limit > MaximumItemLimit {
-		limit = MaximumItemLimit
-	}
-	if len(items) > limit {
-		items = items[:limit]
-	}
+	items = selectSourceAware(items, effectiveItemLimit(request.Preferences.MaxItems))
 
 	return Digest{
-		Date:     request.DigestDate,
-		Timezone: request.Timezone,
-		Items:    items,
-		Empty:    len(items) == 0,
+		Date:           request.DigestDate,
+		Timezone:       request.Timezone,
+		CandidateCount: candidateCount,
+		Items:          items,
+		Empty:          len(items) == 0,
 	}
+}
+
+func effectiveItemLimit(value int) int {
+	switch {
+	case value <= 0:
+		return DefaultItemLimit
+	case value < MinimumItemLimit:
+		return MinimumItemLimit
+	case value > MaximumItemLimit:
+		return MaximumItemLimit
+	default:
+		return value
+	}
+}
+
+func selectSourceAware(ranked []Item, limit int) []Item {
+	if len(ranked) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(ranked) <= limit {
+		return ranked
+	}
+
+	selected := make([]bool, len(ranked))
+	selectedCount := 0
+	contributions := make(map[string]int)
+	for index, item := range ranked {
+		keys := attributedSourceKeys(item.Sources)
+		eligible := false
+		for _, key := range keys {
+			if contributions[key] < firstPassItemsPerSource {
+				eligible = true
+				break
+			}
+		}
+		if !eligible {
+			continue
+		}
+
+		selected[index] = true
+		selectedCount++
+		for _, key := range keys {
+			if contributions[key] < firstPassItemsPerSource {
+				contributions[key]++
+			}
+		}
+		if selectedCount == limit {
+			break
+		}
+	}
+
+	for index := range ranked {
+		if selectedCount == limit {
+			break
+		}
+		if selected[index] {
+			continue
+		}
+		selected[index] = true
+		selectedCount++
+	}
+
+	items := make([]Item, 0, selectedCount)
+	for index, item := range ranked {
+		if selected[index] {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func attributedSourceKeys(sources []SourceAttribution) []string {
+	keys := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		key := source.SourceID
+		if key == "" {
+			key = "url:" + source.SourceURL
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func (generator Generator) groupSignals(
@@ -134,10 +218,30 @@ func (generator Generator) groupSignals(
 	for _, root := range order {
 		item := *byRoot[root]
 		sortMergedItem(&item)
+		item.identity = uniqueCandidateIdentity(item.identity, item.Signals)
 		item.Score = generator.score(item, preferences)
 		items = append(items, item)
 	}
 	return items
+}
+
+func uniqueCandidateIdentity(base string, signals []storage.StartupSignal) string {
+	discriminator := ""
+	for _, signal := range signals {
+		candidate := signal.ID
+		if candidate == "" {
+			candidate = strings.Join([]string{
+				signal.SourceID,
+				signal.SourceURL,
+				signal.StartupName,
+				signal.PublishedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
+			}, "|")
+		}
+		if discriminator == "" || candidate < discriminator {
+			discriminator = candidate
+		}
+	}
+	return base + "|member:" + discriminator
 }
 
 func aliasKeys(identity ingestion.SignalIdentity) []string {

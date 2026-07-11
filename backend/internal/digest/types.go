@@ -7,6 +7,7 @@ import (
 )
 
 const (
+	MinimumItemLimit     = storage.MinimumDigestItems
 	MaximumItemLimit     = storage.MaximumDigestItems
 	DefaultItemLimit     = MaximumItemLimit
 	DefaultMessageLength = 4096
@@ -25,10 +26,11 @@ type Request struct {
 }
 
 type Digest struct {
-	Date     string
-	Timezone string
-	Items    []Item
-	Empty    bool
+	Date           string
+	Timezone       string
+	CandidateCount int
+	Items          []Item
+	Empty          bool
 }
 
 type Item struct {
@@ -43,6 +45,10 @@ type Item struct {
 	Score       int
 	PublishedAt time.Time
 	identity    string
+}
+
+func (item Item) CandidateIdentity() string {
+	return item.identity
 }
 
 type SourceAttribution struct {

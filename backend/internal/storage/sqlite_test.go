@@ -27,9 +27,9 @@ func TestSQLiteRepositoryPersistsStateAcrossReinitialization(t *testing.T) {
 	preferences := Preferences{TelegramID: 42, Regions: []string{"EU"}, Categories: []string{"AI"}, DeliveryTime: "09:00", Timezone: "Europe/Moscow", MaxItems: 7}
 	health := SourceHealth{SourceID: "sample-public", Status: "ok", LastIngestionAt: now, LastAttemptAt: now}
 	signal := StartupSignal{ID: "signal-1", StartupName: "Acme AI", CanonicalURL: "https://acme.example", SourceID: "sample-public", SourceURL: "https://source.example/acme", SignalType: "launch", PublishedAt: now, Description: "Builds useful tools", Region: "EU", RawPayload: "{}"}
-	digest := DigestRun{ID: "digest-1", DigestDate: "2026-07-09", Timezone: "Europe/Moscow", CreatedAt: now}
+	digest := DigestRun{ID: "digest-1", DigestDate: "2026-07-09", Timezone: "Europe/Moscow", CandidateCount: 3, CreatedAt: now}
 	item := DigestItem{
-		ID: "item-1", DigestID: digest.ID, StartupName: "Acme AI", Summary: "Acme AI launched.", Rank: 1,
+		ID: "item-1", DigestID: digest.ID, CandidateIdentity: "url:https://acme.example", StartupName: "Acme AI", Summary: "Acme AI launched.", Rank: 1,
 		SourceURLs: []string{"https://source.example/acme"},
 		SourceAttributions: []SourceAttribution{{
 			SourceID: "innovate-uk", SourceURL: "https://source.example/acme",
@@ -206,13 +206,17 @@ func TestSQLiteRepositoryNormalizesPreferenceItemLimit(t *testing.T) {
 	must(t, err)
 
 	values := map[int64]int{
-		1: 1,
-		2: 7,
-		3: 10,
-		4: 11,
-		5: 20,
-		6: 0,
-		7: -1,
+		1:  -1,
+		2:  0,
+		3:  1,
+		4:  2,
+		5:  3,
+		6:  4,
+		7:  5,
+		8:  7,
+		9:  10,
+		10: 11,
+		11: 20,
 	}
 	for telegramID, maxItems := range values {
 		must(t, repo.SaveSubscriber(ctx, Subscriber{
@@ -237,6 +241,8 @@ VALUES (?, '[]', '[]', '09:00', 'UTC', ?)
 			want := original
 			if want < 1 || want > 10 {
 				want = 10
+			} else if want < MinimumDigestItems {
+				want = MinimumDigestItems
 			}
 			if preferences.MaxItems != want {
 				t.Fatalf("telegram_id=%d: expected max_items=%d, got %d", telegramID, want, preferences.MaxItems)
@@ -248,13 +254,23 @@ VALUES (?, '[]', '[]', '09:00', 'UTC', ?)
 	repo, err = OpenSQLite(ctx, dbPath)
 	must(t, err)
 	defer repo.Close()
-	must(t, repo.SavePreferences(ctx, Preferences{
-		TelegramID: 1, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 11,
-	}))
-	preferences, err := repo.GetPreferences(ctx, 1)
-	must(t, err)
-	if preferences.MaxItems != 10 {
-		t.Fatalf("new internal write was not normalized: %#v", preferences)
+	for telegramID, test := range []struct {
+		input int
+		want  int
+	}{
+		{input: 1, want: MinimumDigestItems},
+		{input: MinimumDigestItems, want: MinimumDigestItems},
+		{input: 0, want: MaximumDigestItems},
+		{input: 11, want: MaximumDigestItems},
+	} {
+		must(t, repo.SavePreferences(ctx, Preferences{
+			TelegramID: int64(telegramID + 1), DeliveryTime: "09:00", Timezone: "UTC", MaxItems: test.input,
+		}))
+		preferences, err := repo.GetPreferences(ctx, int64(telegramID+1))
+		must(t, err)
+		if preferences.MaxItems != test.want {
+			t.Fatalf("new internal max_items=%d: expected %d, got %#v", test.input, test.want, preferences)
+		}
 	}
 }
 
@@ -397,6 +413,50 @@ CREATE TABLE delivery_queue (
 	if status != "retry" || attempt != 2 || confirmedThrough != 1 || sequence != 0 {
 		t.Fatalf("migration changed legacy state: status=%s attempt=%d cursor=%d sequence=%d", status, attempt, confirmedThrough, sequence)
 	}
+}
+
+func TestSQLiteRepositoryMigratesDigestCandidateCountIdempotently(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "old-digest.db")
+	db, err := sql.Open("sqlite", dbPath)
+	must(t, err)
+	_, err = db.ExecContext(ctx, `
+CREATE TABLE digest_runs (
+	id TEXT PRIMARY KEY,
+	digest_date TEXT NOT NULL,
+	timezone TEXT NOT NULL,
+	created_at TEXT NOT NULL
+);
+CREATE TABLE digest_items (
+	id TEXT PRIMARY KEY,
+	digest_id TEXT NOT NULL,
+	startup_name TEXT NOT NULL,
+	summary TEXT NOT NULL,
+	rank INTEGER NOT NULL,
+	source_urls_json TEXT NOT NULL
+);
+INSERT INTO digest_runs (id, digest_date, timezone, created_at)
+VALUES ('legacy-digest', '2026-07-10', 'UTC', '2026-07-10T08:00:00Z')
+`)
+	must(t, err)
+	must(t, db.Close())
+
+	for range 2 {
+		repo, err := OpenSQLite(ctx, dbPath)
+		must(t, err)
+		run, items, err := repo.GetDigestRun(ctx, "legacy-digest")
+		must(t, err)
+		if run.CandidateCount != 0 || len(items) != 0 {
+			t.Fatalf("legacy digest migration changed state: run=%#v items=%#v", run, items)
+		}
+		must(t, repo.Close())
+	}
+
+	db, err = sql.Open("sqlite", dbPath)
+	must(t, err)
+	defer db.Close()
+	assertSQLiteColumnCount(t, db, "digest_runs", "candidate_count", 1)
+	assertSQLiteColumnCount(t, db, "digest_items", "candidate_identity", 1)
 }
 
 func TestSQLiteRepositoryMigratesAndPreservesSourceAttemptCadence(t *testing.T) {

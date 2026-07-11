@@ -51,10 +51,11 @@ func (generator Generator) StoredDeliveryMessages(run storage.DigestRun, storedI
 	}
 
 	return generator.RenderMessages(Digest{
-		Date:     run.DigestDate,
-		Timezone: run.Timezone,
-		Items:    digestItems,
-		Empty:    len(digestItems) == 0,
+		Date:           run.DigestDate,
+		Timezone:       run.Timezone,
+		CandidateCount: run.CandidateCount,
+		Items:          digestItems,
+		Empty:          len(digestItems) == 0,
 	})
 }
 
