@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -313,11 +314,12 @@ func (server *Server) dueDeliveries(writer http.ResponseWriter, request *http.Re
 
 	response := v1.DueDeliveriesResponse{Deliveries: make([]v1.Delivery, 0, len(queued))}
 	for _, queuedDelivery := range queued {
-		eligible, sourceIDs, err := server.deliveryDisplayEligible(request.Context(), queuedDelivery)
+		run, items, err := server.store.GetDigestRun(request.Context(), queuedDelivery.DigestID)
 		if err != nil {
 			writeInternalError(writer, err)
 			return
 		}
+		eligible, sourceIDs := server.deliveryDisplayEligible(items)
 		if !eligible {
 			_, _, err := server.store.SuppressDelivery(
 				request.Context(),
@@ -335,7 +337,7 @@ func (server *Server) dueDeliveries(writer http.ResponseWriter, request *http.Re
 			}
 			continue
 		}
-		messages, totalMessages, err := server.deliveryMessages(request.Context(), queuedDelivery)
+		messages, totalMessages, err := storedDeliveryMessages(queuedDelivery, run, items)
 		if err != nil {
 			writeInternalError(writer, err)
 			return
@@ -373,19 +375,12 @@ func (server *Server) displayEligibleSignals(signals []storage.StartupSignal) []
 	return eligible
 }
 
-func (server *Server) deliveryDisplayEligible(
-	ctx context.Context,
-	queued storage.Delivery,
-) (bool, []string, error) {
-	_, items, err := server.store.GetDigestRun(ctx, queued.DigestID)
-	if err != nil {
-		return false, nil, err
-	}
+func (server *Server) deliveryDisplayEligible(items []storage.DigestItem) (bool, []string) {
 	unsafe := map[string]struct{}{}
 	unsafeFound := false
 	for _, item := range items {
 		if len(item.SourceAttributions) == 0 {
-			return false, nil, nil
+			return false, nil
 		}
 		for _, attribution := range item.SourceAttributions {
 			sourceID := strings.TrimSpace(attribution.SourceID)
@@ -402,12 +397,24 @@ func (server *Server) deliveryDisplayEligible(
 		sourceIDs = append(sourceIDs, sourceID)
 	}
 	sort.Strings(sourceIDs)
-	return !unsafeFound, sourceIDs, nil
+	return !unsafeFound, sourceIDs
 }
 
 func validPublicSourceURL(raw string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return false
+	}
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "" || hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") ||
+		strings.HasSuffix(hostname, ".local") {
+		return false
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() &&
+			!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsMulticast() && !ip.IsUnspecified()
+	}
+	return true
 }
 
 func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.Request) {
@@ -569,6 +576,14 @@ func (server *Server) deliveryMessages(ctx context.Context, queued storage.Deliv
 	if err != nil {
 		return nil, 0, err
 	}
+	return storedDeliveryMessages(queued, run, items)
+}
+
+func storedDeliveryMessages(
+	queued storage.Delivery,
+	run storage.DigestRun,
+	items []storage.DigestItem,
+) ([]v1.DigestMessage, int, error) {
 	messages := (digest.Generator{}).StoredDeliveryMessages(run, items)
 	if len(messages) == 0 {
 		return nil, 0, fmt.Errorf("delivery %s rendered no messages", queued.ID)

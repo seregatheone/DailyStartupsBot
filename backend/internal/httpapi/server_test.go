@@ -588,6 +588,13 @@ func TestRestartSuppressesRestoredDeliveryWithUnsafeAttribution(t *testing.T) {
 			}},
 			wantSources: `["eligible"]`,
 		},
+		{
+			name: "eligible source private attribution url",
+			attributions: []storage.SourceAttribution{{
+				SourceID: "eligible", SourceURL: "https://127.0.0.1/internal",
+			}},
+			wantSources: `["eligible"]`,
+		},
 		{name: "legacy attribution missing", attributions: nil, wantSources: `[]`},
 	}
 	for _, test := range cases {

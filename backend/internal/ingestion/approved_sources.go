@@ -50,27 +50,32 @@ var (
 		"innovate-uk": {
 			DeniedSubjects: []string{"innovate uk", "uk government", "government", "programme", "projects", "businesses"},
 			AccessMethod:   "atom",
+			ApprovedHost:   "www.gov.uk",
 			Tags:           []string{"public", "govuk", "startup"},
 		},
 		"uk-research-and-innovation": {
 			DeniedSubjects: []string{"uk research and innovation", "ukri", "universities", "university", "researchers", "research"},
 			AccessMethod:   "atom",
+			ApprovedHost:   "www.gov.uk",
 			Tags:           []string{"public", "govuk", "startup"},
 		},
 		"british-business-bank": {
 			DeniedSubjects: []string{"british business bank", "bank", "fund", "portfolio", "scheme", "report", "research"},
 			AccessMethod:   "atom",
+			ApprovedHost:   "www.gov.uk",
 			Tags:           []string{"public", "govuk", "startup"},
 		},
 		techCrunchStartupsSourceID: {
 			DeniedSubjects: []string{"techcrunch", "tech crunch"},
 			AccessMethod:   "rss",
+			ApprovedHost:   "techcrunch.com",
 			Tags:           []string{"public", "rss", "startup", "funding", "launch"},
 			StartupNews:    true,
 		},
 		euStartupsSourceID: {
 			DeniedSubjects: []string{"eu-startups", "eu startups"},
 			AccessMethod:   "rss",
+			ApprovedHost:   "www.eu-startups.com",
 			Tags:           []string{"public", "rss", "startup", "funding", "launch"},
 			StartupNews:    true,
 		},
@@ -83,6 +88,7 @@ var (
 type approvedSourcePolicy struct {
 	DeniedSubjects []string
 	AccessMethod   string
+	ApprovedHost   string
 	Tags           []string
 	StartupNews    bool
 }
@@ -226,8 +232,13 @@ func buildLiveRuntimeFromCatalog(catalog runtimeSourceCatalog) (Registry, []conf
 		displayEligible[source.ID] = *source.DisplayEligible
 		parsedFeedURL, err := url.Parse(source.FeedURL)
 		parsedTermsURL, termsErr := url.Parse(source.TermsURL)
+		expectedFeedHost := policy.ApprovedHost
+		if isHackerNewsSource {
+			expectedFeedHost = "hacker-news.firebaseio.com"
+		}
 		if err != nil || parsedFeedURL.Scheme != "https" || parsedFeedURL.Host == "" || parsedFeedURL.User != nil || seenEndpoints[source.FeedURL] ||
-			termsErr != nil || parsedTermsURL.Scheme != "https" || parsedTermsURL.Host == "" || parsedTermsURL.User != nil {
+			!strings.EqualFold(parsedFeedURL.Host, expectedFeedHost) ||
+			termsErr != nil || !isPublicHTTPSURL(parsedTermsURL) {
 			return Registry{}, nil, errors.New("approved source catalog contains unsafe URL")
 		}
 		seenEndpoints[source.FeedURL] = true

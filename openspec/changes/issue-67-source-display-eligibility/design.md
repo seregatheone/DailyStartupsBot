@@ -26,6 +26,7 @@ The embedded catalog owns approved access, reuse, and attribution evidence for s
 4. **Suppress an unsafe stored delivery as one immutable unit.** Before `/v1/deliveries/due` returns a delivery, the backend validates every persisted item attribution against the current registry. Any revoked, unknown, empty, or malformed source suppresses the entire remaining delivery, including mixed-source and partially confirmed snapshots. Re-rendering was rejected because message boundaries and `confirmed_through` are immutable retry state.
 5. **Persist structured suppression state on the queue row.** A compare-and-set transition changes due/retry state to terminal `suppressed`, clears `next_attempt_at`, and records `suppression_reason`, sorted unique source IDs, `suppressed_at`, and catalog revision. Attempts, cursor, digest, items, source health, and subscriber activity are unchanged. Repeating reconciliation is idempotent; concurrent successful send wins through the existing conflict semantics.
 6. **Keep transport unaware of source policy.** The Python worker receives only safe due deliveries. `suppressed` is neither `blocked` (subscriber inactive) nor `failed` (retry exhaustion), and it is terminal for due-list and health calculations.
+7. **Pin network destinations independently from catalog URLs.** Each approved adapter policy owns its expected publisher host; an edited catalog URL cannot authorize a replacement host. Production transports disable proxy routing, resolve the hostname once, reject any non-public result, and dial the validated IP directly while preserving TLS hostname verification. Injected test transports remain explicit test seams.
 
 ## Risks / Trade-offs
 
@@ -33,6 +34,7 @@ The embedded catalog owns approved access, reuse, and attribution evidence for s
 - [Catalog policy takes effect only after restart/deploy] → The catalog is embedded intentionally; restart coverage proves restored deliveries are reconciled before send.
 - [Legacy snapshots may lack structured attribution] → Suppress rather than trust URL-only fallback; retain the rows for audit.
 - [Queue schema grows] → Use nullable/defaulted columns and idempotent migration so historical rows remain readable.
+- [DNS or catalog tampering redirects fetches internally] → Pin publisher hosts and reject private, loopback, link-local, multicast, and unspecified resolved addresses before dialing.
 
 ## Migration Plan
 

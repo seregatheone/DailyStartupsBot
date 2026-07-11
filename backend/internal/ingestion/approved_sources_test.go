@@ -140,6 +140,28 @@ func TestCatalogRequiresExplicitDisplayEligibility(t *testing.T) {
 	}
 }
 
+func TestCatalogCannotAuthorizeAReplacementFeedHost(t *testing.T) {
+	var catalog runtimeSourceCatalog
+	if err := json.Unmarshal(approvedSourceCatalogJSON, &catalog); err != nil {
+		t.Fatalf("decode runtime catalog: %v", err)
+	}
+	for _, rawURL := range []string{
+		"https://127.0.0.1/feed.xml",
+		"https://10.0.0.1/feed.xml",
+		"https://localhost/feed.xml",
+		"https://attacker.example/feed.xml",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			modified := catalog
+			modified.Sources = append([]runtimeCatalogSource(nil), catalog.Sources...)
+			modified.Sources[0].FeedURL = rawURL
+			if _, _, err := buildLiveRuntimeFromCatalog(modified); err == nil {
+				t.Fatalf("catalog replacement host was self-authorized: %s", rawURL)
+			}
+		})
+	}
+}
+
 func TestGenericRegistryDoesNotGrantDisplayPermission(t *testing.T) {
 	registry := NewRegistry(fakeAdapter{id: "unreviewed", accessMethod: "test"})
 	if registry.DisplayEligible("unreviewed") || registry.DisplayEligible("unknown") {

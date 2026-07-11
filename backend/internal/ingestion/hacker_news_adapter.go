@@ -114,10 +114,7 @@ func NewHackerNewsAdapter(options HackerNewsAdapterOptions) (*HackerNewsAdapter,
 		}
 		allowedContentTypes[contentType] = struct{}{}
 	}
-	transport := http.DefaultTransport
-	if options.Transport != nil {
-		transport = options.Transport
-	}
+	transport := safeFeedTransport(options.Transport)
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   options.Timeout,

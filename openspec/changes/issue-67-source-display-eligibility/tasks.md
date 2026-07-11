@@ -3,6 +3,7 @@
 - [x] 1.1 Add explicit display eligibility to every embedded catalog source and validate missing policy fail-closed
 - [x] 1.2 Carry display policy and catalog revision through live/dry-run registries independently from fetch activation
 - [x] 1.3 Add GOV.UK, TechCrunch, EU-Startups, unknown-source, and six-source startup regression tests
+- [x] 1.4 Pin approved publisher hosts and reject non-public resolved network destinations and attribution URLs
 
 ## 2. Fresh Public Generation
 

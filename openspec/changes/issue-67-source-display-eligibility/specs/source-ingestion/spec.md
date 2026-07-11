@@ -18,3 +18,18 @@ The system SHALL keep public display eligibility in the reviewed source catalog 
 #### Scenario: Complete live registry starts after revocation
 - **WHEN** GOV.UK, TechCrunch, or EU-Startups display eligibility is revoked
 - **THEN** all six approved adapters still assemble and source health/fetch activation remain independently observable
+
+### Requirement: Independently pinned catalog network destinations
+The system SHALL validate approved network destinations against code-owned publisher hosts and SHALL connect only to publicly routable resolved addresses.
+
+#### Scenario: Catalog URL changes host
+- **WHEN** an embedded catalog feed URL is changed to localhost, a private IP, or any host other than the adapter policy's reviewed publisher host
+- **THEN** live registry assembly fails closed instead of deriving permission from the changed URL
+
+#### Scenario: Approved hostname resolves privately
+- **WHEN** DNS resolution for an approved feed host returns loopback, private, link-local, multicast, unspecified, or mixed public/non-public addresses
+- **THEN** the production transport rejects the request before dialing and does not use a proxy fallback
+
+#### Scenario: Restored attribution links locally
+- **WHEN** a stored delivery attribution contains a localhost or non-public IP URL
+- **THEN** the delivery is treated as unprovable and suppressed before public rendering
