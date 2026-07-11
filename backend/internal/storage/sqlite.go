@@ -82,6 +82,8 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 		{table: "delivery_queue", name: "next_attempt_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "delivery_queue", name: "confirmed_through", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "delivery_attempts", name: "sequence", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "digest_runs", name: "candidate_count", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "digest_items", name: "candidate_identity", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "digest_items", name: "source_attributions_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{table: "source_health", name: "last_attempt_at", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
@@ -111,9 +113,12 @@ WHERE last_attempt_at = '' AND status IN ('ok', 'failed', 'fetching')
 func (repo *SQLiteRepository) normalizePreferenceItemLimits(ctx context.Context) error {
 	_, err := repo.db.ExecContext(ctx, `
 UPDATE subscriber_preferences
-SET max_items = ?
-WHERE max_items < 1 OR max_items > ?
-`, MaximumDigestItems, MaximumDigestItems)
+SET max_items = CASE
+	WHEN max_items >= 1 AND max_items < ? THEN ?
+	ELSE ?
+END
+WHERE max_items < ? OR max_items > ?
+`, MinimumDigestItems, MinimumDigestItems, MaximumDigestItems, MinimumDigestItems, MaximumDigestItems)
 	if err != nil {
 		return fmt.Errorf("normalize preference item limits: %w", err)
 	}
@@ -429,13 +434,14 @@ FROM startup_signals
 
 func (repo *SQLiteRepository) SaveDigestRun(ctx context.Context, run DigestRun) error {
 	_, err := repo.db.ExecContext(ctx, `
-INSERT INTO digest_runs (id, digest_date, timezone, created_at)
-VALUES (?, ?, ?, ?)
+INSERT INTO digest_runs (id, digest_date, timezone, candidate_count, created_at)
+VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	digest_date = excluded.digest_date,
 	timezone = excluded.timezone,
+	candidate_count = excluded.candidate_count,
 	created_at = excluded.created_at
-`, run.ID, run.DigestDate, run.Timezone, formatTime(run.CreatedAt))
+`, run.ID, run.DigestDate, run.Timezone, run.CandidateCount, formatTime(run.CreatedAt))
 	return err
 }
 
@@ -449,16 +455,17 @@ func (repo *SQLiteRepository) SaveDigestItem(ctx context.Context, item DigestIte
 		return err
 	}
 	_, err = repo.db.ExecContext(ctx, `
-INSERT INTO digest_items (id, digest_id, startup_name, summary, rank, source_urls_json, source_attributions_json)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO digest_items (id, digest_id, candidate_identity, startup_name, summary, rank, source_urls_json, source_attributions_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	digest_id = excluded.digest_id,
+	candidate_identity = excluded.candidate_identity,
 	startup_name = excluded.startup_name,
 	summary = excluded.summary,
 	rank = excluded.rank,
 	source_urls_json = excluded.source_urls_json,
 	source_attributions_json = excluded.source_attributions_json
-`, item.ID, item.DigestID, item.StartupName, item.Summary, item.Rank, sourceURLs, sourceAttributions)
+`, item.ID, item.DigestID, item.CandidateIdentity, item.StartupName, item.Summary, item.Rank, sourceURLs, sourceAttributions)
 	return err
 }
 
@@ -483,13 +490,14 @@ func (repo *SQLiteRepository) SaveDigestSnapshot(ctx context.Context, run Digest
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO digest_runs (id, digest_date, timezone, created_at)
-VALUES (?, ?, ?, ?)
+INSERT INTO digest_runs (id, digest_date, timezone, candidate_count, created_at)
+VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	digest_date = excluded.digest_date,
 	timezone = excluded.timezone,
+	candidate_count = excluded.candidate_count,
 	created_at = excluded.created_at
-`, run.ID, run.DigestDate, run.Timezone, formatTime(run.CreatedAt)); err != nil {
+`, run.ID, run.DigestDate, run.Timezone, run.CandidateCount, formatTime(run.CreatedAt)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM digest_items WHERE digest_id = ?`, run.ID); err != nil {
@@ -505,9 +513,9 @@ ON CONFLICT(id) DO UPDATE SET
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO digest_items (id, digest_id, startup_name, summary, rank, source_urls_json, source_attributions_json)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`, item.ID, item.DigestID, item.StartupName, item.Summary, item.Rank, sourceURLs, sourceAttributions); err != nil {
+INSERT INTO digest_items (id, digest_id, candidate_identity, startup_name, summary, rank, source_urls_json, source_attributions_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, item.ID, item.DigestID, item.CandidateIdentity, item.StartupName, item.Summary, item.Rank, sourceURLs, sourceAttributions); err != nil {
 			return err
 		}
 	}
@@ -518,16 +526,16 @@ func (repo *SQLiteRepository) GetDigestRun(ctx context.Context, id string) (Dige
 	var run DigestRun
 	var createdAt string
 	if err := repo.db.QueryRowContext(ctx, `
-SELECT id, digest_date, timezone, created_at
+SELECT id, digest_date, timezone, candidate_count, created_at
 FROM digest_runs
 WHERE id = ?
-`, id).Scan(&run.ID, &run.DigestDate, &run.Timezone, &createdAt); err != nil {
+`, id).Scan(&run.ID, &run.DigestDate, &run.Timezone, &run.CandidateCount, &createdAt); err != nil {
 		return DigestRun{}, nil, err
 	}
 	run.CreatedAt = parseStoredTime(createdAt)
 
 	rows, err := repo.db.QueryContext(ctx, `
-	SELECT id, digest_id, startup_name, summary, rank, source_urls_json, source_attributions_json
+	SELECT id, digest_id, candidate_identity, startup_name, summary, rank, source_urls_json, source_attributions_json
 FROM digest_items
 WHERE digest_id = ?
 ORDER BY rank ASC
@@ -542,7 +550,7 @@ ORDER BY rank ASC
 		var item DigestItem
 		var sourceURLs string
 		var sourceAttributions string
-		if err := rows.Scan(&item.ID, &item.DigestID, &item.StartupName, &item.Summary, &item.Rank, &sourceURLs, &sourceAttributions); err != nil {
+		if err := rows.Scan(&item.ID, &item.DigestID, &item.CandidateIdentity, &item.StartupName, &item.Summary, &item.Rank, &sourceURLs, &sourceAttributions); err != nil {
 			return DigestRun{}, nil, err
 		}
 		item.SourceURLs = unmarshalStrings(sourceURLs)

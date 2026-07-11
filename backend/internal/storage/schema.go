@@ -40,11 +40,13 @@ var migrationStatements = []string{
 		id TEXT PRIMARY KEY,
 		digest_date TEXT NOT NULL,
 		timezone TEXT NOT NULL,
+		candidate_count INTEGER NOT NULL DEFAULT 0,
 		created_at TEXT NOT NULL
 	)`,
 	`CREATE TABLE IF NOT EXISTS digest_items (
 		id TEXT PRIMARY KEY,
 		digest_id TEXT NOT NULL,
+		candidate_identity TEXT NOT NULL DEFAULT '',
 		startup_name TEXT NOT NULL,
 		summary TEXT NOT NULL,
 		rank INTEGER NOT NULL,

@@ -1,4 +1,4 @@
-.PHONY: test test-backend test-bot test-ops check-localization apply-telegram-metadata run-backend dry-run-backend run-bot live-up live-smoke telegram-e2e telegram-e2e-checklist
+.PHONY: test test-backend test-bot test-ops check-localization apply-telegram-metadata run-backend dry-run-backend run-bot live-up live-smoke telegram-e2e telegram-e2e-checklist scheduled-telegram-e2e
 
 test: test-backend test-bot test-ops check-localization
 
@@ -38,3 +38,6 @@ telegram-e2e:
 
 telegram-e2e-checklist:
 	python3 scripts/telegram_e2e.py checklist
+
+scheduled-telegram-e2e:
+	python3 scripts/scheduled_telegram_e2e.py run

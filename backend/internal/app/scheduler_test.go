@@ -28,10 +28,10 @@ func TestScheduledPipelinePersistsPersonalizedDigestsAndDeduplicates(t *testing.
 
 	now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
 	seedSubscription(t, repository, storage.Subscriber{TelegramID: 1, Active: true, CreatedAt: now}, storage.Preferences{
-		TelegramID: 1, Categories: []string{"AI"}, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 1,
+		TelegramID: 1, Categories: []string{"AI"}, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 5,
 	})
 	seedSubscription(t, repository, storage.Subscriber{TelegramID: 2, Active: true, CreatedAt: now}, storage.Preferences{
-		TelegramID: 2, DeliveryTime: "09:00", Timezone: "Europe/Moscow", MaxItems: 2,
+		TelegramID: 2, DeliveryTime: "09:00", Timezone: "Europe/Moscow", MaxItems: 6,
 	})
 	seedSubscription(t, repository, storage.Subscriber{TelegramID: 3, Active: true, CreatedAt: now}, storage.Preferences{
 		TelegramID: 3, DeliveryTime: "11:00", Timezone: "UTC", MaxItems: 10,
@@ -50,6 +50,22 @@ func TestScheduledPipelinePersistsPersonalizedDigestsAndDeduplicates(t *testing.
 			ID: "hr", StartupName: "HR Co", CanonicalURL: "https://hr.example", SourceID: "source",
 			SourceURL: "https://source.example/hr", SignalType: "launch", PublishedAt: now.Add(-2 * time.Hour),
 			Description: "HR startup", Region: "US", RawPayload: `{"categories":["HR"]}`,
+		},
+		{
+			ID: "fintech", StartupName: "Fintech Co", CanonicalURL: "https://fintech.example", SourceID: "source",
+			SourceURL: "https://source.example/fintech", SignalType: "launch", PublishedAt: now.Add(-3 * time.Hour),
+		},
+		{
+			ID: "health", StartupName: "Health Co", CanonicalURL: "https://health.example", SourceID: "source",
+			SourceURL: "https://source.example/health", SignalType: "launch", PublishedAt: now.Add(-4 * time.Hour),
+		},
+		{
+			ID: "climate", StartupName: "Climate Co", CanonicalURL: "https://climate.example", SourceID: "source",
+			SourceURL: "https://source.example/climate", SignalType: "launch", PublishedAt: now.Add(-5 * time.Hour),
+		},
+		{
+			ID: "robotics", StartupName: "Robotics Co", CanonicalURL: "https://robotics.example", SourceID: "source",
+			SourceURL: "https://source.example/robotics", SignalType: "launch", PublishedAt: now.Add(-6 * time.Hour),
 		},
 	} {
 		if err := repository.SaveStartupSignal(ctx, signal); err != nil {
@@ -92,7 +108,7 @@ func TestScheduledPipelinePersistsPersonalizedDigestsAndDeduplicates(t *testing.
 		itemCounts[queued.TelegramID] = len(items)
 		createdAt[queued.TelegramID] = run.CreatedAt
 	}
-	if itemCounts[1] != 1 || itemCounts[2] != 2 {
+	if itemCounts[1] != 5 || itemCounts[2] != 6 {
 		t.Fatalf("preferences were not applied: %#v", itemCounts)
 	}
 
@@ -261,7 +277,7 @@ func TestLocalDayWindowUsesCalendarDayAcrossDST(t *testing.T) {
 
 func TestScheduledDigestSnapshotPreservesStructuredSourceAttribution(t *testing.T) {
 	run, items := scheduledDigestSnapshot(42, time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC), digest.Digest{
-		Date: "2026-07-10", Timezone: "UTC",
+		Date: "2026-07-10", Timezone: "UTC", CandidateCount: 7,
 		Items: []digest.Item{{
 			StartupName: "Acme", Description: "Launch",
 			Sources: []digest.SourceAttribution{{
@@ -269,7 +285,7 @@ func TestScheduledDigestSnapshotPreservesStructuredSourceAttribution(t *testing.
 			}},
 		}},
 	})
-	if run.ID == "" || len(items) != 1 || len(items[0].SourceAttributions) != 1 ||
+	if run.ID == "" || run.CandidateCount != 7 || len(items) != 1 || len(items[0].SourceAttributions) != 1 ||
 		items[0].SourceAttributions[0].SourceID != "innovate-uk" ||
 		items[0].SourceAttributions[0].SourceURL != "https://www.gov.uk/government/news/acme" {
 		t.Fatalf("structured attribution was not snapshotted: run=%#v items=%#v", run, items)

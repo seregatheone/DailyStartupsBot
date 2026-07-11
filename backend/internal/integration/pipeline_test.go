@@ -49,7 +49,7 @@ func TestPersistedScheduledPipelineWorkflow(t *testing.T) {
 		t.Fatalf("unexpected subscription: %#v", subscribed)
 	}
 
-	maxItems := 1
+	maxItems := 5
 	patched := sendJSON[v1.PreferencesPatchRequest, preferencesResponse](
 		t,
 		server.Client(),
@@ -235,6 +235,7 @@ func TestPersistedScheduledPipelineWorkflow(t *testing.T) {
 	}
 	if persistedDigest.DigestDate != "2026-07-09" ||
 		persistedDigest.Timezone != "America/New_York" ||
+		persistedDigest.CandidateCount != 1 ||
 		!persistedDigest.CreatedAt.Equal(fixedCycle) {
 		t.Fatalf("unexpected persisted digest: %#v", persistedDigest)
 	}
@@ -302,6 +303,114 @@ func TestPersistedScheduledPipelineWorkflow(t *testing.T) {
 	}
 }
 
+func TestScheduledPipelinePersistsBalancedSourceSelection(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	const telegramID int64 = 6501
+
+	cfg := config.Default()
+	cfg.Timezone = "UTC"
+	cfg.IngestionTime = "23:59"
+	cfg.DeliveryTime = "11:00"
+
+	repository, err := storage.OpenSQLite(ctx, filepath.Join(t.TempDir(), "balanced.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	t.Cleanup(func() { _ = repository.Close() })
+	_, err = repository.SaveSubscription(
+		ctx,
+		storage.Subscriber{
+			TelegramID: telegramID,
+			Username:   "balanced-e2e",
+			Active:     true,
+			CreatedAt:  now,
+		},
+		storage.Preferences{
+			TelegramID:   telegramID,
+			DeliveryTime: "11:00",
+			Timezone:     "UTC",
+			MaxItems:     5,
+		},
+	)
+	if err != nil {
+		t.Fatalf("save subscription: %v", err)
+	}
+
+	signals := []storage.StartupSignal{
+		{ID: "a1", StartupName: "Alpha One", CanonicalURL: "https://alpha-one.example", SourceID: "source-a", SourceURL: "https://publisher-a.example/one", SignalType: "funding", PublishedAt: now.Add(-time.Hour)},
+		{ID: "a2", StartupName: "Alpha Two", CanonicalURL: "https://alpha-two.example", SourceID: "source-a", SourceURL: "https://publisher-a.example/two", SignalType: "funding", PublishedAt: now.Add(-2 * time.Hour)},
+		{ID: "a3", StartupName: "Alpha Three", CanonicalURL: "https://alpha-three.example", SourceID: "source-a", SourceURL: "https://publisher-a.example/three", SignalType: "funding", PublishedAt: now.Add(-3 * time.Hour)},
+		{ID: "a4", StartupName: "Alpha Four", CanonicalURL: "https://alpha-four.example", SourceID: "source-a", SourceURL: "https://publisher-a.example/four", SignalType: "funding", PublishedAt: now.Add(-4 * time.Hour)},
+		{ID: "b1", StartupName: "Beta One", CanonicalURL: "https://beta-one.example", SourceID: "source-b", SourceURL: "https://publisher-b.example/one", SignalType: "news", PublishedAt: now.Add(-5 * time.Hour)},
+		{ID: "b2", StartupName: "Beta Two", CanonicalURL: "https://beta-two.example", SourceID: "source-b", SourceURL: "https://publisher-b.example/two", SignalType: "news", PublishedAt: now.Add(-6 * time.Hour)},
+		{ID: "c1", StartupName: "Gamma One", CanonicalURL: "https://gamma-one.example", SourceID: "source-c", SourceURL: "https://publisher-c.example/one", SignalType: "news", PublishedAt: now.Add(-7 * time.Hour)},
+	}
+	for _, startupSignal := range signals {
+		if err := repository.SaveStartupSignal(ctx, startupSignal); err != nil {
+			t.Fatalf("save startup signal %s: %v", startupSignal.ID, err)
+		}
+	}
+
+	cycle, err := app.NewScheduledPipeline(cfg, repository, discardLogger()).RunOnce(ctx, now)
+	if err != nil {
+		t.Fatalf("run scheduled pipeline: %v", err)
+	}
+	if cycle.IngestionRan || cycle.Subscribers != 1 || cycle.Queued != 1 || cycle.Failed != 0 {
+		t.Fatalf("unexpected scheduled cycle: %#v", cycle)
+	}
+	deliveries, err := repository.ListDueDeliveries(ctx, now)
+	if err != nil {
+		t.Fatalf("list due deliveries: %v", err)
+	}
+	if len(deliveries) != 1 {
+		t.Fatalf("expected one due delivery: %#v", deliveries)
+	}
+	run, items, err := repository.GetDigestRun(ctx, deliveries[0].DigestID)
+	if err != nil {
+		t.Fatalf("load balanced digest: %v", err)
+	}
+	if run.CandidateCount != 7 || len(items) != 5 {
+		t.Fatalf("expected five balanced items: %#v", items)
+	}
+
+	sourceCounts := map[string]int{}
+	selectedNames := map[string]bool{}
+	selectedIdentities := map[string]bool{}
+	for index, item := range items {
+		if item.Rank != index+1 || item.CandidateIdentity == "" ||
+			selectedIdentities[item.CandidateIdentity] || len(item.SourceAttributions) != 1 {
+			t.Fatalf("invalid persisted attribution or rank: %#v", items)
+		}
+		selectedIdentities[item.CandidateIdentity] = true
+		attribution := item.SourceAttributions[0]
+		sourceCounts[attribution.SourceID]++
+		selectedNames[item.StartupName] = true
+	}
+	if sourceCounts["source-a"] != 2 || sourceCounts["source-b"] != 2 ||
+		sourceCounts["source-c"] != 1 || selectedNames["Alpha Three"] || selectedNames["Alpha Four"] {
+		t.Fatalf("source-aware first pass was not persisted: counts=%v names=%v", sourceCounts, selectedNames)
+	}
+
+	server := httptest.NewServer(httpapi.NewServer(cfg, repository))
+	t.Cleanup(server.Close)
+	due := getJSON[v1.DueDeliveriesResponse](t, server.Client(), server.URL+"/v1/deliveries/due")
+	if len(due.Deliveries) != 1 {
+		t.Fatalf("balanced delivery was not exposed: %#v", due)
+	}
+	combined := ""
+	for _, message := range due.Deliveries[0].Messages {
+		combined += message.Text
+	}
+	for _, publisher := range []string{
+		"publisher-a.example", "publisher-b.example", "publisher-c.example",
+	} {
+		if !strings.Contains(combined, publisher) {
+			t.Fatalf("rendered delivery lost publisher %s: %s", publisher, combined)
+		}
+	}
+}
+
 type preferencesResponse struct {
 	Preferences v1.Preferences `json:"preferences"`
 }
@@ -311,7 +420,7 @@ func assertPreferences(t *testing.T, preferences v1.Preferences) {
 	if len(preferences.Regions) != 1 || preferences.Regions[0] != "EU" ||
 		len(preferences.Categories) != 1 || preferences.Categories[0] != "AI" ||
 		preferences.DeliveryTime != "20:00" || preferences.Timezone != "America/New_York" ||
-		preferences.MaxItems != 1 {
+		preferences.MaxItems != 5 {
 		t.Fatalf("unexpected preferences: %#v", preferences)
 	}
 }

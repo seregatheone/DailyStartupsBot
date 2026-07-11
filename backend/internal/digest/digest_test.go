@@ -90,13 +90,21 @@ func TestGenerateCanonicalConflictCannotBeBridgedInAnyOrder(t *testing.T) {
 	signals := []storage.StartupSignal{
 		signal("a", "Atlas", "https://atlas-a.example", "a", "https://source.example/a", "launch"),
 		signal("b", "Atlas", "https://atlas-b.example", "b", "https://source.example/b", "launch"),
-		signal("u", "Atlas", "", "u", "https://source.example/u", "launch"),
+		signal("u1", "Atlas", "", "u1", "https://source.example/u1", "launch"),
+		signal("u2", "Atlas", "", "u2", "https://source.example/u2", "launch"),
 	}
 	var baseline []Item
 	for index, permutation := range signalPermutations(signals) {
 		items := (Generator{}).Generate(Request{DigestDate: "2026-07-09", Signals: permutation}).Items
-		if len(items) != 3 {
+		if len(items) != 4 {
 			t.Fatalf("permutation %d bridged canonical collision: %#v", index, items)
+		}
+		identities := map[string]bool{}
+		for _, item := range items {
+			if item.CandidateIdentity() == "" || identities[item.CandidateIdentity()] {
+				t.Fatalf("permutation %d produced ambiguous candidate identity: %#v", index, items)
+			}
+			identities[item.CandidateIdentity()] = true
 		}
 		if index == 0 {
 			baseline = items
@@ -195,6 +203,9 @@ func TestGenerateEnforcesProductItemLimit(t *testing.T) {
 	}{
 		{name: "negative uses default", maxItems: -1, want: 10},
 		{name: "default", maxItems: 0, want: 10},
+		{name: "legacy one uses minimum", maxItems: 1, want: 5},
+		{name: "legacy four uses minimum", maxItems: 4, want: 5},
+		{name: "minimum", maxItems: 5, want: 5},
 		{name: "first above maximum", maxItems: 11, want: 10},
 		{name: "legacy above maximum", maxItems: 20, want: 10},
 		{name: "custom smaller limit", maxItems: 7, want: 7},
@@ -208,7 +219,138 @@ func TestGenerateEnforcesProductItemLimit(t *testing.T) {
 			if len(digest.Items) != test.want {
 				t.Fatalf("max_items=%d: expected %d items, got %d", test.maxItems, test.want, len(digest.Items))
 			}
+			if digest.CandidateCount != len(signals) {
+				t.Fatalf("max_items=%d: expected %d candidates, got %d", test.maxItems, len(signals), digest.CandidateCount)
+			}
 		})
+	}
+}
+
+func TestGenerateBalancesProductiveSourcesThenFillsByGlobalRank(t *testing.T) {
+	generator := Generator{SourcePriorities: map[string]int{"prolific": 100}}
+	request := Request{
+		Preferences: storage.Preferences{MaxItems: 5},
+		Signals: []storage.StartupSignal{
+			signal("a1", "Alpha1", "https://alpha1.example", "prolific", "https://source/a1", "launch"),
+			signal("a2", "Alpha2", "https://alpha2.example", "prolific", "https://source/a2", "launch"),
+			signal("a3", "Alpha3", "https://alpha3.example", "prolific", "https://source/a3", "launch"),
+			signal("a4", "Alpha4", "https://alpha4.example", "prolific", "https://source/a4", "launch"),
+			signal("a5", "Alpha5", "https://alpha5.example", "prolific", "https://source/a5", "launch"),
+			signal("b1", "Beta1", "https://beta1.example", "smaller", "https://source/b1", "launch"),
+			signal("b2", "Beta2", "https://beta2.example", "smaller", "https://source/b2", "launch"),
+		},
+	}
+
+	generated := generator.Generate(request)
+	want := []string{"Alpha1", "Alpha2", "Alpha3", "Beta1", "Beta2"}
+	if got := startupNames(generated.Items); !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected source-aware first pass followed by global fill\nwant=%v\ngot=%v", want, got)
+	}
+}
+
+func TestGenerateDoesNotReserveSlotsForAbsentOrExhaustedSources(t *testing.T) {
+	generator := Generator{SourcePriorities: map[string]int{"prolific": 100, "failed-with-no-candidates": 1000}}
+	request := Request{
+		Preferences: storage.Preferences{MaxItems: 5},
+		Signals: []storage.StartupSignal{
+			signal("a1", "Alpha1", "https://alpha1.example", "prolific", "https://source/a1", "launch"),
+			signal("a2", "Alpha2", "https://alpha2.example", "prolific", "https://source/a2", "launch"),
+			signal("a3", "Alpha3", "https://alpha3.example", "prolific", "https://source/a3", "launch"),
+			signal("a4", "Alpha4", "https://alpha4.example", "prolific", "https://source/a4", "launch"),
+			signal("b1", "Beta1", "https://beta1.example", "exhausted", "https://source/b1", "launch"),
+		},
+	}
+
+	generated := generator.Generate(request)
+	want := []string{"Alpha1", "Alpha2", "Alpha3", "Alpha4", "Beta1"}
+	if got := startupNames(generated.Items); !reflect.DeepEqual(got, want) {
+		t.Fatalf("absent and exhausted sources must not reserve slots\nwant=%v\ngot=%v", want, got)
+	}
+}
+
+func TestGenerateReturnsActualCandidateCountBelowMinimum(t *testing.T) {
+	generated := (Generator{}).Generate(Request{
+		Preferences: storage.Preferences{MaxItems: 1},
+		Signals: []storage.StartupSignal{
+			signal("1", "Alpha", "https://alpha.example", "source", "https://source/1", "launch"),
+			signal("2", "Beta", "https://beta.example", "source", "https://source/2", "launch"),
+			signal("3", "Gamma", "https://gamma.example", "source", "https://source/3", "launch"),
+		},
+	})
+
+	if len(generated.Items) != 3 {
+		t.Fatalf("minimum limit must not pad or discard fewer candidates, got %#v", generated.Items)
+	}
+	if generated.CandidateCount != 3 {
+		t.Fatalf("expected exact pre-limit candidate count, got %d", generated.CandidateCount)
+	}
+}
+
+func TestGenerateCrossSourceDuplicateConsumesEachFirstPassContribution(t *testing.T) {
+	generator := Generator{SourcePriorities: map[string]int{"a": 40, "b": 20}}
+	request := Request{
+		Preferences: storage.Preferences{MaxItems: 5},
+		Signals: []storage.StartupSignal{
+			signal("merged-a", "Merged", "https://merged.example", "a", "https://source/merged-a", "launch"),
+			signal("merged-b", "Merged", "https://merged.example/", "b", "https://source/merged-b", "launch"),
+			signal("a1", "Alpha1", "https://alpha1.example", "a", "https://source/a1", "launch"),
+			signal("a2", "Alpha2", "https://alpha2.example", "a", "https://source/a2", "launch"),
+			signal("b1", "Beta1", "https://beta1.example", "b", "https://source/b1", "launch"),
+			signal("b2", "Beta2", "https://beta2.example", "b", "https://source/b2", "launch"),
+			signal("c1", "Charlie1", "https://charlie1.example", "c", "https://source/c1", "launch"),
+		},
+	}
+
+	generated := generator.Generate(request)
+	want := []string{"Merged", "Alpha1", "Alpha2", "Beta1", "Charlie1"}
+	if got := startupNames(generated.Items); !reflect.DeepEqual(got, want) {
+		t.Fatalf("cross-source item must count once and consume both source contributions\nwant=%v\ngot=%v", want, got)
+	}
+	if len(generated.Items[0].Sources) != 2 {
+		t.Fatalf("merged item lost source attribution: %#v", generated.Items[0])
+	}
+	if generated.CandidateCount != 6 {
+		t.Fatalf("cross-source duplicate was counted more than once: %d", generated.CandidateCount)
+	}
+}
+
+func TestGenerateRankingIsStableAcrossInputOrder(t *testing.T) {
+	baseTime := now()
+	newest := signal("newest", "Zulu", "https://zulu.example", "source", "https://source/zulu", "launch")
+	newest.PublishedAt = baseTime.Add(2 * time.Hour)
+	alpha := signal("alpha", "Alpha", "https://alpha.example", "source", "https://source/alpha", "launch")
+	alpha.PublishedAt = baseTime.Add(time.Hour)
+	betaA := signal("beta-a", "Beta", "https://beta-a.example", "source", "https://source/beta-a", "launch")
+	betaB := signal("beta-b", "beta", "https://beta-b.example", "source", "https://source/beta-b", "launch")
+	oldest := signal("oldest", "Aardvark", "https://aardvark.example", "source", "https://source/aardvark", "launch")
+	oldest.PublishedAt = baseTime.Add(-time.Hour)
+	want := []string{"Zulu", "Alpha", "Beta", "beta", "Aardvark"}
+
+	for index, permutation := range signalPermutations([]storage.StartupSignal{newest, alpha, betaA, betaB, oldest}) {
+		generated := (Generator{}).Generate(Request{Signals: permutation})
+		if got := startupNames(generated.Items); !reflect.DeepEqual(got, want) {
+			t.Fatalf("permutation %d changed quality/recency/name/identity order\nwant=%v\ngot=%v", index, want, got)
+		}
+	}
+}
+
+func TestGenerateOneSourceFillsBeyondFirstPass(t *testing.T) {
+	signals := make([]storage.StartupSignal, 0, 8)
+	for index := 1; index <= 8; index++ {
+		name := fmt.Sprintf("Startup%02d", index)
+		signals = append(signals, signal(
+			fmt.Sprintf("%d", index), name, "https://"+strings.ToLower(name)+".example",
+			"only-source", fmt.Sprintf("https://source/%d", index), "launch",
+		))
+	}
+
+	generated := (Generator{}).Generate(Request{
+		Preferences: storage.Preferences{MaxItems: 5},
+		Signals:     signals,
+	})
+	want := []string{"Startup01", "Startup02", "Startup03", "Startup04", "Startup05"}
+	if got := startupNames(generated.Items); !reflect.DeepEqual(got, want) {
+		t.Fatalf("single source must fill the digest after its first two candidates\nwant=%v\ngot=%v", want, got)
 	}
 }
 
@@ -320,11 +462,14 @@ func TestRenderAppliesItemLimitAndSplitsMessages(t *testing.T) {
 	generator := Generator{MessageLimit: 120}
 	request := Request{
 		DigestDate:  "2026-07-09",
-		Preferences: storage.Preferences{MaxItems: 2},
+		Preferences: storage.Preferences{MaxItems: 5},
 		Signals: []storage.StartupSignal{
 			signal("1", "Alpha", "https://alpha.example", "rss", "https://source/a", "launch"),
 			signal("2", "Beta", "https://beta.example", "rss", "https://source/b", "launch"),
 			signal("3", "Gamma", "https://gamma.example", "rss", "https://source/c", "launch"),
+			signal("4", "Delta", "https://delta.example", "rss", "https://source/d", "launch"),
+			signal("5", "Epsilon", "https://epsilon.example", "rss", "https://source/e", "launch"),
+			signal("6", "Zeta", "https://zeta.example", "rss", "https://source/f", "launch"),
 		},
 	}
 
@@ -334,8 +479,8 @@ func TestRenderAppliesItemLimitAndSplitsMessages(t *testing.T) {
 	for _, message := range messages[1:] {
 		combined += message.Text
 	}
-	if strings.Contains(combined, "Gamma") {
-		t.Fatalf("expected max item limit to drop third item: %s", combined)
+	if strings.Contains(combined, "Zeta") {
+		t.Fatalf("expected max item limit to drop sixth item: %s", combined)
 	}
 	if len(messages) < 2 {
 		t.Fatalf("expected low message limit to split messages, got %#v", messages)
@@ -560,6 +705,14 @@ func signalPermutations(signals []storage.StartupSignal) [][]storage.StartupSign
 	}
 	visit(0)
 	return result
+}
+
+func startupNames(items []Item) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.StartupName)
+	}
+	return names
 }
 
 func now() time.Time {

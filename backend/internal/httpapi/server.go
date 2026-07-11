@@ -579,8 +579,12 @@ func validatePreferences(preferences storage.Preferences) error {
 	if _, err := time.LoadLocation(preferences.Timezone); err != nil {
 		return fmt.Errorf("Некорректный часовой пояс")
 	}
-	if preferences.MaxItems < 1 || preferences.MaxItems > digest.MaximumItemLimit {
-		return fmt.Errorf("max_items должен быть в диапазоне от 1 до %d", digest.MaximumItemLimit)
+	if preferences.MaxItems < storage.MinimumDigestItems || preferences.MaxItems > digest.MaximumItemLimit {
+		return fmt.Errorf(
+			"max_items должен быть в диапазоне от %d до %d",
+			storage.MinimumDigestItems,
+			digest.MaximumItemLimit,
+		)
 	}
 	return nil
 }

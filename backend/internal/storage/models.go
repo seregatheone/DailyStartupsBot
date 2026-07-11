@@ -5,7 +5,10 @@ import (
 	"time"
 )
 
-const MaximumDigestItems = 10
+const (
+	MinimumDigestItems = 5
+	MaximumDigestItems = 10
+)
 
 var (
 	ErrDeliveryTerminal = errors.New("delivery is already terminal")
@@ -32,6 +35,9 @@ func normalizeMaxItems(value int) int {
 	if value < 1 || value > MaximumDigestItems {
 		return MaximumDigestItems
 	}
+	if value < MinimumDigestItems {
+		return MinimumDigestItems
+	}
 	return value
 }
 
@@ -57,10 +63,11 @@ type StartupSignal struct {
 }
 
 type DigestRun struct {
-	ID         string
-	DigestDate string
-	Timezone   string
-	CreatedAt  time.Time
+	ID             string
+	DigestDate     string
+	Timezone       string
+	CandidateCount int
+	CreatedAt      time.Time
 }
 
 type SourceAttribution struct {
@@ -71,6 +78,7 @@ type SourceAttribution struct {
 type DigestItem struct {
 	ID                 string
 	DigestID           string
+	CandidateIdentity  string
 	StartupName        string
 	Summary            string
 	Rank               int

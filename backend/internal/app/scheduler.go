@@ -279,6 +279,7 @@ func (pipeline *ScheduledPipeline) planDeliveries(
 			"digest_generation",
 			"telegram_id", subscriber.TelegramID,
 			"digest_date", digestDate,
+			"candidates", generated.CandidateCount,
 			"items", len(items),
 			"empty", generated.Empty,
 		)
@@ -399,10 +400,11 @@ func scheduledDigestSnapshot(
 ) (storage.DigestRun, []storage.DigestItem) {
 	digestID := stableScheduledID("dig", fmt.Sprintf("%d:%s", telegramID, generated.Date))
 	run := storage.DigestRun{
-		ID:         digestID,
-		DigestDate: generated.Date,
-		Timezone:   generated.Timezone,
-		CreatedAt:  now.UTC(),
+		ID:             digestID,
+		DigestDate:     generated.Date,
+		Timezone:       generated.Timezone,
+		CandidateCount: generated.CandidateCount,
+		CreatedAt:      now.UTC(),
 	}
 	items := make([]storage.DigestItem, 0, len(generated.Items))
 	for index, generatedItem := range generated.Items {
@@ -426,6 +428,7 @@ func scheduledDigestSnapshot(
 		items = append(items, storage.DigestItem{
 			ID:                 stableScheduledID("item", fmt.Sprintf("%s:%d", digestID, index+1)),
 			DigestID:           digestID,
+			CandidateIdentity:  generatedItem.CandidateIdentity(),
 			StartupName:        generatedItem.StartupName,
 			Summary:            generatedItem.Description,
 			Rank:               index + 1,
