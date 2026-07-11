@@ -411,8 +411,7 @@ func validPublicSourceURL(raw string) bool {
 		return false
 	}
 	if ip := net.ParseIP(hostname); ip != nil {
-		return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() &&
-			!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsMulticast() && !ip.IsUnspecified()
+		return ingestion.IsPublicIP(ip)
 	}
 	return true
 }

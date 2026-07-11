@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -105,6 +106,16 @@ var (
 	errRedirectPolicy  = errors.New("feed redirect policy rejected request")
 	feedDangerousBlock = regexp.MustCompile(`(?is)<(script|style)\b[^>]*>.*?</(script|style)\s*>`)
 	feedMarkup         = regexp.MustCompile(`<[^>]+>`)
+	nonPublicPrefixes  = []netip.Prefix{
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("198.18.0.0/15"),
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
 )
 
 func NewFeedAdapter(options FeedAdapterOptions) (*FeedAdapter, error) {
@@ -761,7 +772,7 @@ func safePublicDialContext(ctx context.Context, network, address string) (net.Co
 		return nil, errors.New("feed source host resolution failed")
 	}
 	for _, address := range addresses {
-		if !isPublicIP(address.IP) {
+		if !IsPublicIP(address.IP) {
 			return nil, errors.New("feed source resolved to a non-public address")
 		}
 	}
@@ -779,12 +790,25 @@ func isPublicHTTPSURL(parsed *url.URL) bool {
 		return false
 	}
 	if ip := net.ParseIP(hostname); ip != nil {
-		return isPublicIP(ip)
+		return IsPublicIP(ip)
 	}
 	return true
 }
 
-func isPublicIP(ip net.IP) bool {
-	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() &&
-		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsMulticast() && !ip.IsUnspecified()
+func IsPublicIP(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range nonPublicPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
 }
