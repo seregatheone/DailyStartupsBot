@@ -21,4 +21,4 @@
 
 - [x] 4.1 Update README and operator/user documentation for the 5–10 total-item and source-balancing contract
 - [x] 4.2 Run backend, bot, script, race, vet, build, and strict OpenSpec checks
-- [ ] 4.3 Run finalize and acceptance reviews, resolve blocking findings, and archive the completed OpenSpec change
+- [x] 4.3 Run finalize and acceptance reviews, resolve blocking findings, and archive the completed OpenSpec change
