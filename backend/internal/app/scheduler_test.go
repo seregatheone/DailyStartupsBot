@@ -79,7 +79,7 @@ func TestScheduledPipelinePersistsPersonalizedDigestsAndDeduplicates(t *testing.
 	cfg.DeliveryTime = "09:00"
 	cfg.Sources = nil
 	pipeline := NewScheduledPipelineWithRegistry(
-		cfg, repository, testLogger(), ingestion.NewRegistry(schedulerAdapter{id: "source"}),
+		cfg, repository, testLogger(), eligibleSchedulerRegistry(schedulerAdapter{id: "source"}),
 	)
 	pipeline.lastIngestionRun = now
 
@@ -178,7 +178,7 @@ func TestScheduledPipelineFiltersDisplayIneligibleSignalsBeforeGrouping(t *testi
 	cfg.Timezone = "UTC"
 	cfg.IngestionTime = "23:59"
 	cfg.DeliveryTime = "09:00"
-	registry := ingestion.NewRegistry(schedulerAdapter{id: "eligible"})
+	registry := eligibleSchedulerRegistry(schedulerAdapter{id: "eligible"})
 	pipeline := NewScheduledPipelineWithRegistry(cfg, repository, testLogger(), registry)
 	pipeline.lastIngestionRun = now
 
@@ -244,7 +244,7 @@ func TestScheduledPipelinePersistsFreshEmptyDigestWhenNoSignalIsDisplayEligible(
 	cfg.IngestionTime = "23:59"
 	cfg.DeliveryTime = "09:00"
 	pipeline := NewScheduledPipelineWithRegistry(
-		cfg, repository, testLogger(), ingestion.NewRegistry(schedulerAdapter{id: "eligible"}),
+		cfg, repository, testLogger(), eligibleSchedulerRegistry(schedulerAdapter{id: "eligible"}),
 	)
 	pipeline.lastIngestionRun = now
 
@@ -280,7 +280,7 @@ func TestScheduledPipelineIsolatesSourceFailureAndRunsNextDay(t *testing.T) {
 		{ID: "failed", Active: true, AccessMethod: "api"},
 		{ID: "healthy", Active: true, AccessMethod: "api"},
 	}
-	registry := ingestion.NewRegistry(
+	registry := eligibleSchedulerRegistry(
 		schedulerAdapter{id: "failed", err: errors.New("source unavailable")},
 		schedulerAdapter{id: "healthy", records: []ingestion.SourceRecord{{
 			StartupName: "Healthy Co", SourceURL: "https://source.example/healthy",
@@ -337,7 +337,7 @@ func TestScheduledPipelineDoesNotPublishPartialDigestAfterIngestionStorageFailur
 	cfg.IngestionTime = "07:00"
 	cfg.DeliveryTime = "09:00"
 	cfg.Sources = []config.SourceConfig{{ID: "source", Active: true, AccessMethod: "api"}}
-	registry := ingestion.NewRegistry(schedulerAdapter{
+	registry := eligibleSchedulerRegistry(schedulerAdapter{
 		id: "source", records: []ingestion.SourceRecord{{
 			StartupName: "Retry Co", SourceURL: "https://source.example/retry",
 			SignalType: "launch", PublishedAt: now.Add(-time.Hour),
@@ -428,7 +428,7 @@ func TestScheduledPipelinePreservesSourceCadenceAcrossRestart(t *testing.T) {
 	}
 	defer repository.Close()
 	attempts := 0
-	registry := ingestion.NewRegistry(schedulerAdapter{id: "source", attempts: &attempts})
+	registry := eligibleSchedulerRegistry(schedulerAdapter{id: "source", attempts: &attempts})
 	cfg := config.Default()
 	cfg.DryRun = false
 	cfg.Timezone = "UTC"
@@ -487,6 +487,16 @@ func seedSubscription(
 			t.Fatalf("deactivate subscriber %d: %v", subscriber.TelegramID, err)
 		}
 	}
+}
+
+func eligibleSchedulerRegistry(adapters ...schedulerAdapter) ingestion.Registry {
+	sourceAdapters := make([]ingestion.SourceAdapter, 0, len(adapters))
+	sourceIDs := make([]string, 0, len(adapters))
+	for _, adapter := range adapters {
+		sourceAdapters = append(sourceAdapters, adapter)
+		sourceIDs = append(sourceIDs, adapter.id)
+	}
+	return ingestion.NewRegistryWithDisplayPolicy(sourceAdapters, sourceIDs, "scheduler-test")
 }
 
 type schedulerAdapter struct {

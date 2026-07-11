@@ -353,10 +353,14 @@ func TestScheduledPipelinePersistsBalancedSourceSelection(t *testing.T) {
 		}
 	}
 
-	registry := ingestion.NewRegistry(
-		policyAdapter{id: "source-a"},
-		policyAdapter{id: "source-b"},
-		policyAdapter{id: "source-c"},
+	registry := ingestion.NewRegistryWithDisplayPolicy(
+		[]ingestion.SourceAdapter{
+			policyAdapter{id: "source-a"},
+			policyAdapter{id: "source-b"},
+			policyAdapter{id: "source-c"},
+		},
+		[]string{"source-a", "source-b", "source-c"},
+		"integration-test",
 	)
 	cycle, err := app.NewScheduledPipelineWithRegistry(cfg, repository, discardLogger(), registry).RunOnce(ctx, now)
 	if err != nil {

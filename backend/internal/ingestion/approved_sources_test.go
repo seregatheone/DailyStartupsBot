@@ -140,6 +140,16 @@ func TestCatalogRequiresExplicitDisplayEligibility(t *testing.T) {
 	}
 }
 
+func TestGenericRegistryDoesNotGrantDisplayPermission(t *testing.T) {
+	registry := NewRegistry(fakeAdapter{id: "unreviewed", accessMethod: "test"})
+	if registry.DisplayEligible("unreviewed") || registry.DisplayEligible("unknown") {
+		t.Fatal("adapter registration implicitly granted public display permission")
+	}
+	if !DefaultRegistry().DisplayEligible("sample-public") || DefaultRegistry().DisplayEligible("unreviewed") {
+		t.Fatal("dry-run registry did not explicitly scope sample display permission")
+	}
+}
+
 func TestAssembleRuntimeRejectsInvalidLiveSourceOverlay(t *testing.T) {
 	valid := config.SourceConfig{ID: "innovate-uk", Active: true, AccessMethod: "atom"}
 	tests := []struct {

@@ -14,21 +14,37 @@ type Registry struct {
 
 func NewRegistry(adapters ...SourceAdapter) Registry {
 	byID := map[string]SourceAdapter{}
-	displayEligible := map[string]bool{}
 	for _, adapter := range adapters {
 		metadata := adapter.Metadata()
 		byID[metadata.ID] = adapter
-		displayEligible[metadata.ID] = true
 	}
 	return Registry{
 		adapters:        byID,
-		displayEligible: displayEligible,
-		revision:        "explicit-runtime",
+		displayEligible: map[string]bool{},
+		revision:        "unreviewed-runtime",
 	}
 }
 
 func DefaultRegistry() Registry {
-	return NewRegistry(NewSamplePublicAdapter())
+	return newRegistryWithDisplayPolicy(
+		[]SourceAdapter{NewSamplePublicAdapter()},
+		map[string]bool{"sample-public": true},
+		"dry-run-sample-v1",
+	)
+}
+
+func NewRegistryWithDisplayPolicy(
+	adapters []SourceAdapter,
+	displayEligibleSourceIDs []string,
+	revision string,
+) Registry {
+	displayEligible := make(map[string]bool, len(displayEligibleSourceIDs))
+	for _, sourceID := range displayEligibleSourceIDs {
+		if sourceID != "" {
+			displayEligible[sourceID] = true
+		}
+	}
+	return newRegistryWithDisplayPolicy(adapters, displayEligible, revision)
 }
 
 func newRegistryWithDisplayPolicy(
