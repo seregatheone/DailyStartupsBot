@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ import (
 	v1 "github.com/seregatheone/DailyStartupsBot/backend/internal/contracts/v1"
 	deliverydomain "github.com/seregatheone/DailyStartupsBot/backend/internal/delivery"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/digest"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/ingestion"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
 
@@ -35,23 +38,39 @@ type subscriberStore interface {
 	GetDelivery(context.Context, string) (storage.Delivery, error)
 	ListStartupSignals(context.Context, time.Time, time.Time) ([]storage.StartupSignal, error)
 	ListDueDeliveries(context.Context, time.Time) ([]storage.Delivery, error)
+	SuppressDelivery(context.Context, string, int, int, string, []string, time.Time, string) (storage.Delivery, bool, error)
 	RecordDeliveryAttempt(context.Context, storage.DeliveryAttempt, storage.DeliveryTransition) (storage.Delivery, bool, error)
 	GetHealthSnapshot(context.Context, int) (storage.HealthSnapshot, error)
 }
 
+type sourceDisplayPolicy interface {
+	DisplayEligible(string) bool
+	Revision() string
+}
+
 type Server struct {
-	config config.Config
-	store  subscriberStore
-	now    func() time.Time
-	mux    *http.ServeMux
+	config   config.Config
+	store    subscriberStore
+	registry sourceDisplayPolicy
+	now      func() time.Time
+	mux      *http.ServeMux
 }
 
 func NewServer(cfg config.Config, store subscriberStore) *Server {
+	registry, _, err := ingestion.AssembleRuntime(cfg.DryRun, cfg.Sources)
+	if err != nil {
+		registry = ingestion.NewRegistry()
+	}
+	return NewServerWithRegistry(cfg, store, registry)
+}
+
+func NewServerWithRegistry(cfg config.Config, store subscriberStore, registry sourceDisplayPolicy) *Server {
 	server := &Server{
-		config: cfg,
-		store:  store,
-		now:    func() time.Time { return time.Now().UTC() },
-		mux:    http.NewServeMux(),
+		config:   cfg,
+		store:    store,
+		registry: registry,
+		now:      func() time.Time { return time.Now().UTC() },
+		mux:      http.NewServeMux(),
 	}
 	server.routes()
 	return server
@@ -275,6 +294,7 @@ func (server *Server) preview(writer http.ResponseWriter, request *http.Request)
 		writeInternalError(writer, err)
 		return
 	}
+	signals = server.displayEligibleSignals(signals)
 	response := (digest.Generator{}).PreviewResponse(digest.Request{
 		Signals:     signals,
 		Preferences: preferences,
@@ -293,6 +313,28 @@ func (server *Server) dueDeliveries(writer http.ResponseWriter, request *http.Re
 
 	response := v1.DueDeliveriesResponse{Deliveries: make([]v1.Delivery, 0, len(queued))}
 	for _, queuedDelivery := range queued {
+		eligible, sourceIDs, err := server.deliveryDisplayEligible(request.Context(), queuedDelivery)
+		if err != nil {
+			writeInternalError(writer, err)
+			return
+		}
+		if !eligible {
+			_, _, err := server.store.SuppressDelivery(
+				request.Context(),
+				queuedDelivery.ID,
+				queuedDelivery.Attempt,
+				queuedDelivery.ConfirmedThrough,
+				"source_display_ineligible",
+				sourceIDs,
+				server.now(),
+				server.registry.Revision(),
+			)
+			if err != nil && !errors.Is(err, storage.ErrDeliveryConflict) && !errors.Is(err, storage.ErrDeliveryTerminal) {
+				writeInternalError(writer, err)
+				return
+			}
+			continue
+		}
 		messages, totalMessages, err := server.deliveryMessages(request.Context(), queuedDelivery)
 		if err != nil {
 			writeInternalError(writer, err)
@@ -319,6 +361,53 @@ func (server *Server) dueDeliveries(writer http.ResponseWriter, request *http.Re
 	}
 
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) displayEligibleSignals(signals []storage.StartupSignal) []storage.StartupSignal {
+	eligible := make([]storage.StartupSignal, 0, len(signals))
+	for _, signal := range signals {
+		if server.registry.DisplayEligible(signal.SourceID) {
+			eligible = append(eligible, signal)
+		}
+	}
+	return eligible
+}
+
+func (server *Server) deliveryDisplayEligible(
+	ctx context.Context,
+	queued storage.Delivery,
+) (bool, []string, error) {
+	_, items, err := server.store.GetDigestRun(ctx, queued.DigestID)
+	if err != nil {
+		return false, nil, err
+	}
+	unsafe := map[string]struct{}{}
+	unsafeFound := false
+	for _, item := range items {
+		if len(item.SourceAttributions) == 0 {
+			return false, nil, nil
+		}
+		for _, attribution := range item.SourceAttributions {
+			sourceID := strings.TrimSpace(attribution.SourceID)
+			if !server.registry.DisplayEligible(sourceID) || !validPublicSourceURL(attribution.SourceURL) {
+				unsafeFound = true
+				if sourceID != "" {
+					unsafe[sourceID] = struct{}{}
+				}
+			}
+		}
+	}
+	sourceIDs := make([]string, 0, len(unsafe))
+	for sourceID := range unsafe {
+		sourceIDs = append(sourceIDs, sourceID)
+	}
+	sort.Strings(sourceIDs)
+	return !unsafeFound, sourceIDs, nil
+}
+
+func validPublicSourceURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
 }
 
 func (server *Server) deliveryAttempt(writer http.ResponseWriter, request *http.Request) {

@@ -30,6 +30,7 @@ type catalogSource struct {
 	ID                 string   `json:"id"`
 	DisplayName        string   `json:"display_name"`
 	Status             string   `json:"status"`
+	DisplayEligible    *bool    `json:"display_eligible"`
 	PublisherPageURL   string   `json:"publisher_page_url"`
 	PublisherAccessURL string   `json:"publisher_access_url"`
 	FeedURL            string   `json:"feed_url"`
@@ -163,7 +164,7 @@ func TestApprovedSourceCatalogContract(t *testing.T) {
 				t.Fatalf("source id is empty or duplicated: %q", source.ID)
 			}
 			seenIDs[source.ID] = true
-			if source.DisplayName == "" || source.Status != "approved" ||
+			if source.DisplayName == "" || source.Status != "approved" || source.DisplayEligible == nil ||
 				(source.AccessMethod != "atom" && source.AccessMethod != "api" && source.AccessMethod != "rss") {
 				t.Fatal("source identity or approval state is incomplete")
 			}

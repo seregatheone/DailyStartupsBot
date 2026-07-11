@@ -31,6 +31,7 @@ type Repository interface {
 	SaveDigestSnapshot(context.Context, DigestRun, []DigestItem) error
 	GetDigestRun(context.Context, string) (DigestRun, []DigestItem, error)
 	SaveDelivery(context.Context, Delivery) error
+	SuppressDelivery(context.Context, string, int, int, string, []string, time.Time, string) (Delivery, bool, error)
 	DeliveryExists(context.Context, int64, string) (bool, error)
 	GetDelivery(context.Context, string) (Delivery, error)
 	ListDueDeliveries(context.Context, time.Time) ([]Delivery, error)
@@ -81,6 +82,10 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 	}{
 		{table: "delivery_queue", name: "next_attempt_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "delivery_queue", name: "confirmed_through", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "delivery_queue", name: "suppression_reason", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "delivery_queue", name: "suppressed_source_ids_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{table: "delivery_queue", name: "suppressed_at", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "delivery_queue", name: "catalog_revision", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "delivery_attempts", name: "sequence", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "digest_runs", name: "candidate_count", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "digest_items", name: "candidate_identity", definition: "TEXT NOT NULL DEFAULT ''"},
@@ -564,17 +569,33 @@ ORDER BY rank ASC
 }
 
 func (repo *SQLiteRepository) SaveDelivery(ctx context.Context, delivery Delivery) error {
+	sourceIDsJSON := delivery.SuppressedSourceIDsJSON
+	if sourceIDsJSON == "" {
+		sourceIDsJSON = "[]"
+	}
 	_, err := repo.db.ExecContext(ctx, `
-	INSERT INTO delivery_queue (id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO delivery_queue (
+			id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through,
+			next_attempt_at, suppression_reason, suppressed_source_ids_json, suppressed_at,
+			catalog_revision, created_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
-	telegram_id = excluded.telegram_id,
-	digest_id = excluded.digest_id,
-	digest_date = excluded.digest_date,
-	status = excluded.status,
-	attempt = excluded.attempt,
-	next_attempt_at = excluded.next_attempt_at
-	`, delivery.ID, delivery.TelegramID, delivery.DigestID, delivery.DigestDate, delivery.Status, delivery.Attempt, delivery.ConfirmedThrough, formatTime(delivery.NextAttemptAt), formatTime(delivery.CreatedAt))
+		telegram_id = excluded.telegram_id,
+		digest_id = excluded.digest_id,
+		digest_date = excluded.digest_date,
+		status = excluded.status,
+		attempt = excluded.attempt,
+		next_attempt_at = excluded.next_attempt_at,
+		suppression_reason = excluded.suppression_reason,
+		suppressed_source_ids_json = excluded.suppressed_source_ids_json,
+		suppressed_at = excluded.suppressed_at,
+		catalog_revision = excluded.catalog_revision
+	WHERE delivery_queue.status NOT IN ('sent', 'failed', 'blocked', 'suppressed')
+	`, delivery.ID, delivery.TelegramID, delivery.DigestID, delivery.DigestDate, delivery.Status,
+		delivery.Attempt, delivery.ConfirmedThrough, formatTime(delivery.NextAttemptAt),
+		delivery.SuppressionReason, sourceIDsJSON, formatTime(delivery.SuppressedAt),
+		delivery.CatalogRevision, formatTime(delivery.CreatedAt))
 	return err
 }
 
@@ -590,15 +611,19 @@ WHERE telegram_id = ? AND digest_date = ?
 
 func (repo *SQLiteRepository) GetDelivery(ctx context.Context, id string) (Delivery, error) {
 	return getDelivery(repo.db.QueryRowContext(ctx, `
-	SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at
-FROM delivery_queue
-WHERE id = ?
-`, id))
+		SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through,
+			next_attempt_at, created_at, suppression_reason, suppressed_source_ids_json,
+			suppressed_at, catalog_revision
+	FROM delivery_queue
+	WHERE id = ?
+	`, id))
 }
 
 func (repo *SQLiteRepository) ListDueDeliveries(ctx context.Context, now time.Time) ([]Delivery, error) {
 	rows, err := repo.db.QueryContext(ctx, `
-	SELECT d.id, d.telegram_id, d.digest_id, d.digest_date, d.status, d.attempt, d.confirmed_through, d.next_attempt_at, d.created_at
+		SELECT d.id, d.telegram_id, d.digest_id, d.digest_date, d.status, d.attempt,
+			d.confirmed_through, d.next_attempt_at, d.created_at, d.suppression_reason,
+			d.suppressed_source_ids_json, d.suppressed_at, d.catalog_revision
 FROM delivery_queue AS d
 JOIN subscribers AS s ON s.telegram_id = d.telegram_id
 WHERE s.active = 1
@@ -635,13 +660,99 @@ WHERE s.active = 1
 	return deliveries, nil
 }
 
+func (repo *SQLiteRepository) SuppressDelivery(
+	ctx context.Context,
+	deliveryID string,
+	expectedAttempt int,
+	expectedConfirmedThrough int,
+	reason string,
+	suppressedSourceIDs []string,
+	suppressedAt time.Time,
+	catalogRevision string,
+) (Delivery, bool, error) {
+	sourceIDs := canonicalSourceIDs(suppressedSourceIDs)
+	sourceIDsJSON, err := marshalStrings(sourceIDs)
+	if err != nil {
+		return Delivery{}, false, err
+	}
+
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	defer tx.Rollback()
+
+	current, err := getDelivery(tx.QueryRowContext(ctx, `
+		SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through,
+			next_attempt_at, created_at, suppression_reason, suppressed_source_ids_json,
+			suppressed_at, catalog_revision
+	FROM delivery_queue
+	WHERE id = ?
+		`, deliveryID))
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if current.Status == "suppressed" {
+		if current.Attempt == expectedAttempt &&
+			current.ConfirmedThrough == expectedConfirmedThrough &&
+			current.SuppressionReason == reason &&
+			current.SuppressedSourceIDsJSON == sourceIDsJSON &&
+			current.SuppressedAt.Equal(suppressedAt) &&
+			current.CatalogRevision == catalogRevision {
+			return current, false, nil
+		}
+		return Delivery{}, false, ErrDeliveryTerminal
+	}
+	if isTerminalDeliveryStatus(current.Status) {
+		return Delivery{}, false, ErrDeliveryTerminal
+	}
+	if (current.Status != "due" && current.Status != "retry") ||
+		current.Attempt != expectedAttempt ||
+		current.ConfirmedThrough != expectedConfirmedThrough {
+		return Delivery{}, false, ErrDeliveryConflict
+	}
+
+	result, err := tx.ExecContext(ctx, `
+	UPDATE delivery_queue
+	SET status = 'suppressed', next_attempt_at = '', suppression_reason = ?,
+		suppressed_source_ids_json = ?, suppressed_at = ?, catalog_revision = ?
+	WHERE id = ? AND status IN ('due', 'retry') AND attempt = ? AND confirmed_through = ?
+	`, reason, sourceIDsJSON, formatTime(suppressedAt), catalogRevision, deliveryID,
+		expectedAttempt, expectedConfirmedThrough)
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	updatedRows, err := result.RowsAffected()
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if updatedRows != 1 {
+		return Delivery{}, false, ErrDeliveryConflict
+	}
+
+	updated, err := getDelivery(tx.QueryRowContext(ctx, `
+		SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through,
+			next_attempt_at, created_at, suppression_reason, suppressed_source_ids_json,
+			suppressed_at, catalog_revision
+	FROM delivery_queue
+	WHERE id = ?
+		`, deliveryID))
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Delivery{}, false, err
+	}
+	return updated, true, nil
+}
+
 type scanner interface {
 	Scan(...any) error
 }
 
 func getDelivery(row scanner) (Delivery, error) {
 	var delivery Delivery
-	var nextAttemptAt, createdAt string
+	var nextAttemptAt, createdAt, suppressedSourceIDsJSON, suppressedAt string
 	err := row.Scan(
 		&delivery.ID,
 		&delivery.TelegramID,
@@ -652,12 +763,20 @@ func getDelivery(row scanner) (Delivery, error) {
 		&delivery.ConfirmedThrough,
 		&nextAttemptAt,
 		&createdAt,
+		&delivery.SuppressionReason,
+		&suppressedSourceIDsJSON,
+		&suppressedAt,
+		&delivery.CatalogRevision,
 	)
 	if err != nil {
 		return Delivery{}, err
 	}
 	delivery.NextAttemptAt = parseStoredTime(nextAttemptAt)
 	delivery.CreatedAt = parseStoredTime(createdAt)
+	if delivery.Status == "suppressed" || suppressedSourceIDsJSON != "[]" {
+		delivery.SuppressedSourceIDsJSON = suppressedSourceIDsJSON
+	}
+	delivery.SuppressedAt = parseStoredTime(suppressedAt)
 	return delivery, nil
 }
 
@@ -725,8 +844,10 @@ WHERE id = ?
 			return Delivery{}, false, ErrDeliveryConflict
 		}
 		delivery, err := getDelivery(tx.QueryRowContext(ctx, `
-	SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at
-	FROM delivery_queue
+				SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through,
+					next_attempt_at, created_at, suppression_reason, suppressed_source_ids_json,
+					suppressed_at, catalog_revision
+				FROM delivery_queue
 WHERE id = ?
 `, attempt.DeliveryID))
 		return delivery, true, err
@@ -735,7 +856,9 @@ WHERE id = ?
 	}
 
 	current, err := getDelivery(tx.QueryRowContext(ctx, `
-	SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at
+		SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through,
+			next_attempt_at, created_at, suppression_reason, suppressed_source_ids_json,
+			suppressed_at, catalog_revision
 FROM delivery_queue
 WHERE id = ?
 `, attempt.DeliveryID))
@@ -758,9 +881,9 @@ WHERE id = ?
 		return Delivery{}, false, err
 	}
 	result, err := tx.ExecContext(ctx, `
-	UPDATE delivery_queue
-	SET status = ?, attempt = ?, confirmed_through = ?, next_attempt_at = ?
-	WHERE id = ? AND attempt = ? AND confirmed_through = ? AND status NOT IN ('sent', 'failed', 'blocked')
+		UPDATE delivery_queue
+		SET status = ?, attempt = ?, confirmed_through = ?, next_attempt_at = ?
+		WHERE id = ? AND attempt = ? AND confirmed_through = ? AND status NOT IN ('sent', 'failed', 'blocked', 'suppressed')
 	`, transition.Status, transition.Attempt, transition.ConfirmedThrough, formatTime(transition.NextAttemptAt), attempt.DeliveryID, transition.ExpectedAttempt, transition.ExpectedConfirmedThrough)
 	if err != nil {
 		return Delivery{}, false, err
@@ -783,7 +906,9 @@ WHERE telegram_id = ?
 	}
 
 	updated, err := getDelivery(tx.QueryRowContext(ctx, `
-	SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through, next_attempt_at, created_at
+		SELECT id, telegram_id, digest_id, digest_date, status, attempt, confirmed_through,
+			next_attempt_at, created_at, suppression_reason, suppressed_source_ids_json,
+			suppressed_at, catalog_revision
 FROM delivery_queue
 WHERE id = ?
 `, attempt.DeliveryID))
@@ -846,7 +971,7 @@ func validDeliveryTransition(current Delivery, attempt DeliveryAttempt, transiti
 
 func isTerminalDeliveryStatus(status string) bool {
 	switch status {
-	case "sent", "failed", "blocked":
+	case "sent", "failed", "blocked", "suppressed":
 		return true
 	default:
 		return false
@@ -1058,6 +1183,22 @@ func unmarshalStrings(raw string) []string {
 		return []string{}
 	}
 	return values
+}
+
+func canonicalSourceIDs(values []string) []string {
+	unique := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			unique[value] = struct{}{}
+		}
+	}
+	canonical := make([]string, 0, len(unique))
+	for value := range unique {
+		canonical = append(canonical, value)
+	}
+	sort.Strings(canonical)
+	return canonical
 }
 
 func marshalSourceAttributions(values []SourceAttribution) (string, error) {

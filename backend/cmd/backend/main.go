@@ -85,7 +85,7 @@ func runLiveBackendWithRegistry(
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddress, err)
 	}
 	server := &http.Server{
-		Handler:           httpapi.NewServer(cfg, repository),
+		Handler:           httpapi.NewServerWithRegistry(cfg, repository, registry),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	workerContext, cancelWorkers := context.WithCancel(ctx)

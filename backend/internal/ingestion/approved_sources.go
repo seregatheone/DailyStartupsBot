@@ -97,6 +97,7 @@ type runtimeCatalogSource struct {
 	ID                     string   `json:"id"`
 	DisplayName            string   `json:"display_name"`
 	Status                 string   `json:"status"`
+	DisplayEligible        *bool    `json:"display_eligible"`
 	FeedURL                string   `json:"feed_url"`
 	TermsURL               string   `json:"terms_url"`
 	AttributionLabel       string   `json:"attribution_label"`
@@ -197,6 +198,10 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 	if err != nil {
 		return Registry{}, nil, err
 	}
+	return buildLiveRuntimeFromCatalog(catalog)
+}
+
+func buildLiveRuntimeFromCatalog(catalog runtimeSourceCatalog) (Registry, []config.SourceConfig, error) {
 	if catalog.SchemaVersion != 1 || catalog.ReviewedAt == "" ||
 		len(catalog.Sources) != len(approvedSourcePolicies)+1 {
 		return Registry{}, nil, errors.New("approved source catalog metadata is invalid")
@@ -204,18 +209,21 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 
 	adapters := make([]SourceAdapter, 0, len(catalog.Sources))
 	configs := make([]config.SourceConfig, 0, len(catalog.Sources))
+	displayEligible := make(map[string]bool, len(catalog.Sources))
 	seen := make(map[string]bool, len(catalog.Sources))
 	seenEndpoints := make(map[string]bool, len(catalog.Sources))
 	for _, source := range catalog.Sources {
 		policy, isFeedSource := approvedSourcePolicies[source.ID]
 		isHackerNewsSource := source.ID == hackerNewsShowSourceID
-		if (!isFeedSource && !isHackerNewsSource) || seen[source.ID] || source.Status != "approved" || len(source.Credentials) != 0 {
+		if (!isFeedSource && !isHackerNewsSource) || seen[source.ID] || source.Status != "approved" ||
+			source.DisplayEligible == nil || len(source.Credentials) != 0 {
 			return Registry{}, nil, errors.New("approved source catalog contains unsupported source")
 		}
 		if (isFeedSource && source.AccessMethod != policy.AccessMethod) || (isHackerNewsSource && source.AccessMethod != "api") {
 			return Registry{}, nil, errors.New("approved source catalog contains unsupported access method")
 		}
 		seen[source.ID] = true
+		displayEligible[source.ID] = *source.DisplayEligible
 		parsedFeedURL, err := url.Parse(source.FeedURL)
 		parsedTermsURL, termsErr := url.Parse(source.TermsURL)
 		if err != nil || parsedFeedURL.Scheme != "https" || parsedFeedURL.Host == "" || parsedFeedURL.User != nil || seenEndpoints[source.FeedURL] ||
@@ -297,7 +305,11 @@ func buildLiveRuntime() (Registry, []config.SourceConfig, error) {
 		len(seen) != len(approvedSourcePolicies)+1 {
 		return Registry{}, nil, errors.New("approved source catalog is missing required productive source")
 	}
-	return NewRegistry(adapters...), configs, nil
+	return newRegistryWithDisplayPolicy(
+		adapters,
+		displayEligible,
+		fmt.Sprintf("catalog-v%d-%s", catalog.SchemaVersion, catalog.ReviewedAt),
+	), configs, nil
 }
 
 func loadRuntimeCatalog() (runtimeSourceCatalog, error) {

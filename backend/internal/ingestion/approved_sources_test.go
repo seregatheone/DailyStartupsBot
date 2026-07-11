@@ -62,7 +62,7 @@ func TestAssembleRuntimeUsesCatalogAsSingleLiveSourceOwner(t *testing.T) {
 }
 
 func TestAssembleRuntimeTreatsConfigurationAsStrictActivationOverlay(t *testing.T) {
-	_, sources, err := AssembleRuntime(false, []config.SourceConfig{{
+	registry, sources, err := AssembleRuntime(false, []config.SourceConfig{{
 		ID:           "innovate-uk",
 		DisplayName:  "spoofed publisher",
 		Active:       false,
@@ -86,6 +86,57 @@ func TestAssembleRuntimeTreatsConfigurationAsStrictActivationOverlay(t *testing.
 				t.Fatalf("omitted approved source was unexpectedly disabled: %#v", source)
 			}
 		}
+	}
+	if !registry.DisplayEligible("innovate-uk") {
+		t.Fatal("fetch activation overlay changed catalog display eligibility")
+	}
+}
+
+func TestCatalogDisplayRevocationKeepsAdaptersRegistered(t *testing.T) {
+	for _, revokedID := range []string{"innovate-uk", techCrunchStartupsSourceID, euStartupsSourceID} {
+		t.Run(revokedID, func(t *testing.T) {
+			var catalog runtimeSourceCatalog
+			if err := json.Unmarshal(approvedSourceCatalogJSON, &catalog); err != nil {
+				t.Fatalf("decode runtime catalog: %v", err)
+			}
+			found := false
+			for index := range catalog.Sources {
+				if catalog.Sources[index].ID == revokedID {
+					eligible := false
+					catalog.Sources[index].DisplayEligible = &eligible
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("catalog source not found: %s", revokedID)
+			}
+
+			registry, sources, err := buildLiveRuntimeFromCatalog(catalog)
+			if err != nil {
+				t.Fatalf("build runtime with display revocation: %v", err)
+			}
+			registered, skipped := registry.Resolve(sources)
+			if len(registered) != len(catalog.Sources) || len(skipped) != 0 {
+				t.Fatalf("display revocation changed registry: registered=%d skipped=%#v", len(registered), skipped)
+			}
+			if registry.DisplayEligible(revokedID) || registry.DisplayEligible("unknown-source") || registry.DisplayEligible("") {
+				t.Fatal("display policy did not fail closed")
+			}
+			if registry.Revision() != "catalog-v1-2026-07-10" {
+				t.Fatalf("unexpected catalog revision: %q", registry.Revision())
+			}
+		})
+	}
+}
+
+func TestCatalogRequiresExplicitDisplayEligibility(t *testing.T) {
+	var catalog runtimeSourceCatalog
+	if err := json.Unmarshal(approvedSourceCatalogJSON, &catalog); err != nil {
+		t.Fatalf("decode runtime catalog: %v", err)
+	}
+	catalog.Sources[0].DisplayEligible = nil
+	if _, _, err := buildLiveRuntimeFromCatalog(catalog); err == nil {
+		t.Fatal("runtime accepted source without explicit display eligibility")
 	}
 }
 
