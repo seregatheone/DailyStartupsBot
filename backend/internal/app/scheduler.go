@@ -40,6 +40,7 @@ type ScheduledCycleResult struct {
 type ScheduledPipeline struct {
 	config           config.Config
 	repository       scheduledRepository
+	registry         ingestion.Registry
 	ingestor         ingestion.Service
 	generator        digest.Generator
 	logger           *slog.Logger
@@ -70,6 +71,7 @@ func NewScheduledPipelineWithRegistry(
 	return &ScheduledPipeline{
 		config:     cfg,
 		repository: repository,
+		registry:   registry,
 		ingestor:   ingestion.NewService(registry, repository),
 		generator:  digest.Generator{},
 		logger:     logger,
@@ -238,6 +240,7 @@ func (pipeline *ScheduledPipeline) planDeliveries(
 			))
 			continue
 		}
+		signals = pipeline.displayEligibleSignals(signals)
 
 		generated := pipeline.generator.Generate(digest.Request{
 			Signals:     signals,
@@ -292,6 +295,16 @@ func (pipeline *ScheduledPipeline) planDeliveries(
 	}
 
 	return result, errors.Join(subscriberErrors...)
+}
+
+func (pipeline *ScheduledPipeline) displayEligibleSignals(signals []storage.StartupSignal) []storage.StartupSignal {
+	eligible := make([]storage.StartupSignal, 0, len(signals))
+	for _, signal := range signals {
+		if pipeline.registry.DisplayEligible(signal.SourceID) {
+			eligible = append(eligible, signal)
+		}
+	}
+	return eligible
 }
 
 func (pipeline *ScheduledPipeline) effectivePreferences(

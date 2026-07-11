@@ -7,7 +7,9 @@ import (
 )
 
 type Registry struct {
-	adapters map[string]SourceAdapter
+	adapters        map[string]SourceAdapter
+	displayEligible map[string]bool
+	revision        string
 }
 
 func NewRegistry(adapters ...SourceAdapter) Registry {
@@ -16,11 +18,55 @@ func NewRegistry(adapters ...SourceAdapter) Registry {
 		metadata := adapter.Metadata()
 		byID[metadata.ID] = adapter
 	}
-	return Registry{adapters: byID}
+	return Registry{
+		adapters:        byID,
+		displayEligible: map[string]bool{},
+		revision:        "unreviewed-runtime",
+	}
 }
 
 func DefaultRegistry() Registry {
-	return NewRegistry(NewSamplePublicAdapter())
+	return newRegistryWithDisplayPolicy(
+		[]SourceAdapter{NewSamplePublicAdapter()},
+		map[string]bool{"sample-public": true},
+		"dry-run-sample-v1",
+	)
+}
+
+func NewRegistryWithDisplayPolicy(
+	adapters []SourceAdapter,
+	displayEligibleSourceIDs []string,
+	revision string,
+) Registry {
+	displayEligible := make(map[string]bool, len(displayEligibleSourceIDs))
+	for _, sourceID := range displayEligibleSourceIDs {
+		if sourceID != "" {
+			displayEligible[sourceID] = true
+		}
+	}
+	return newRegistryWithDisplayPolicy(adapters, displayEligible, revision)
+}
+
+func newRegistryWithDisplayPolicy(
+	adapters []SourceAdapter,
+	displayEligible map[string]bool,
+	revision string,
+) Registry {
+	registry := NewRegistry(adapters...)
+	registry.displayEligible = make(map[string]bool, len(displayEligible))
+	for sourceID, eligible := range displayEligible {
+		registry.displayEligible[sourceID] = eligible
+	}
+	registry.revision = revision
+	return registry
+}
+
+func (registry Registry) DisplayEligible(sourceID string) bool {
+	return sourceID != "" && registry.displayEligible[sourceID]
+}
+
+func (registry Registry) Revision() string {
+	return registry.revision
 }
 
 func (registry Registry) Resolve(configs []config.SourceConfig) ([]RegisteredSource, []SourceResult) {

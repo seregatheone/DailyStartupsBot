@@ -159,6 +159,66 @@ func TestPreviewReadsPersistedSignalsInLiveModeWithoutIngestion(t *testing.T) {
 	}
 }
 
+func TestPreviewFiltersPersistedSignalsBeforeGrouping(t *testing.T) {
+	repository, err := storage.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "preview-policy.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+	fixedNow := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	if _, err := repository.SaveSubscription(context.Background(), storage.Subscriber{
+		TelegramID: 67, Active: true, CreatedAt: fixedNow,
+	}, storage.Preferences{
+		TelegramID: 67, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 10,
+	}); err != nil {
+		t.Fatalf("seed subscription: %v", err)
+	}
+	for _, signal := range []storage.StartupSignal{
+		{
+			ID: "eligible", StartupName: "Acme", CanonicalURL: "https://acme.example",
+			SourceID: "eligible", SourceURL: "https://eligible.example/acme", SignalType: "launch",
+			PublishedAt: fixedNow.Add(-2 * time.Hour), Description: "Eligible summary",
+		},
+		{
+			ID: "revoked", StartupName: "Acme", CanonicalURL: "https://acme.example",
+			SourceID: "revoked", SourceURL: "https://revoked.example/acme", SignalType: "funding",
+			PublishedAt: fixedNow.Add(-time.Hour), Description: "Revoked summary",
+		},
+		{
+			ID: "unknown", StartupName: "Unknown", SourceID: "unknown",
+			SourceURL: "https://unknown.example/item", SignalType: "launch",
+			PublishedAt: fixedNow.Add(-30 * time.Minute),
+		},
+	} {
+		if err := repository.SaveStartupSignal(context.Background(), signal); err != nil {
+			t.Fatalf("seed signal %s: %v", signal.ID, err)
+		}
+	}
+
+	server := NewServerWithRegistry(config.Default(), repository, testDisplayPolicy{
+		eligible: map[string]bool{"eligible": true}, revision: "test-policy",
+	})
+	server.now = func() time.Time { return fixedNow }
+	testServer := httptest.NewServer(server)
+	defer testServer.Close()
+
+	response := requestJSON(t, http.MethodPost, testServer.URL+"/v1/digests/preview", map[string]any{
+		"telegram_id": 67,
+		"date":        "2026-07-11",
+	})
+	var preview v1.PreviewResponse
+	decodeResponse(t, response, &preview)
+	if preview.Empty || len(preview.Messages) != 1 || !strings.Contains(preview.Messages[0].Text, "Acme") ||
+		!strings.Contains(preview.Messages[0].Text, "Eligible summary") ||
+		strings.Contains(preview.Messages[0].Text, "Revoked") || strings.Contains(preview.Messages[0].Text, "Unknown") {
+		t.Fatalf("preview leaked display-ineligible evidence: %#v", preview)
+	}
+	stored, err := repository.ListStartupSignals(context.Background(), fixedNow.Add(-24*time.Hour), fixedNow.Add(time.Hour))
+	if err != nil || len(stored) != 3 {
+		t.Fatalf("preview policy changed audit signals: signals=%#v err=%v", stored, err)
+	}
+}
+
 func TestPreferencesEnforceItemLimit(t *testing.T) {
 	repository, err := storage.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "backend.db"))
 	if err != nil {
@@ -483,6 +543,113 @@ func TestDeliveryMessageProgressResumesAfterRestartWithoutRepeatingConfirmedPart
 	decodeResponse(t, response, &due)
 	if len(due.Deliveries) != 0 {
 		t.Fatalf("completed delivery remained due: %#v", due)
+	}
+}
+
+func TestRestartSuppressesRestoredDeliveryWithUnsafeAttribution(t *testing.T) {
+	cases := []struct {
+		name         string
+		attributions []storage.SourceAttribution
+		wantSources  string
+	}{
+		{
+			name: "gov uk revoked",
+			attributions: []storage.SourceAttribution{{
+				SourceID: "innovate-uk", SourceURL: "https://www.gov.uk/government/news/acme",
+			}},
+			wantSources: `["innovate-uk"]`,
+		},
+		{
+			name: "techcrunch revoked",
+			attributions: []storage.SourceAttribution{{
+				SourceID: "techcrunch-startups", SourceURL: "https://techcrunch.com/acme",
+			}},
+			wantSources: `["techcrunch-startups"]`,
+		},
+		{
+			name: "eu startups revoked",
+			attributions: []storage.SourceAttribution{{
+				SourceID: "eu-startups", SourceURL: "https://www.eu-startups.com/acme",
+			}},
+			wantSources: `["eu-startups"]`,
+		},
+		{
+			name: "mixed eligible and revoked",
+			attributions: []storage.SourceAttribution{
+				{SourceID: "eligible", SourceURL: "https://eligible.example/acme"},
+				{SourceID: "eu-startups", SourceURL: "https://www.eu-startups.com/acme"},
+			},
+			wantSources: `["eu-startups"]`,
+		},
+		{
+			name: "eligible source missing attribution url",
+			attributions: []storage.SourceAttribution{{
+				SourceID: "eligible", SourceURL: "",
+			}},
+			wantSources: `["eligible"]`,
+		},
+		{
+			name: "eligible source private attribution url",
+			attributions: []storage.SourceAttribution{{
+				SourceID: "eligible", SourceURL: "https://127.0.0.1/internal",
+			}},
+			wantSources: `["eligible"]`,
+		},
+		{name: "legacy attribution missing", attributions: nil, wantSources: `[]`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbPath := filepath.Join(t.TempDir(), "restored-policy.db")
+			now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+			repository, err := storage.OpenSQLite(ctx, dbPath)
+			if err != nil {
+				t.Fatalf("open initial repository: %v", err)
+			}
+			seedDeliveryWithAttribution(t, repository, storage.Delivery{
+				ID: "delivery-policy", TelegramID: 67, DigestID: "digest-policy",
+				DigestDate: "2026-07-11", Status: "due", CreatedAt: now,
+			}, test.attributions)
+			if err := repository.Close(); err != nil {
+				t.Fatalf("close initial repository: %v", err)
+			}
+
+			reopened, err := storage.OpenSQLite(ctx, dbPath)
+			if err != nil {
+				t.Fatalf("reopen repository: %v", err)
+			}
+			defer reopened.Close()
+			server := NewServerWithRegistry(config.Default(), reopened, testDisplayPolicy{
+				eligible: map[string]bool{"eligible": true}, revision: "catalog-test-revision",
+			})
+			server.now = func() time.Time { return now }
+			testServer := httptest.NewServer(server)
+			defer testServer.Close()
+
+			response := requestJSON(t, http.MethodGet, testServer.URL+"/v1/deliveries/due", nil)
+			var due v1.DueDeliveriesResponse
+			decodeResponse(t, response, &due)
+			if len(due.Deliveries) != 0 {
+				t.Fatalf("unsafe restored delivery reached worker: %#v", due)
+			}
+			persisted, err := reopened.GetDelivery(ctx, "delivery-policy")
+			if err != nil {
+				t.Fatalf("load suppressed delivery: %v", err)
+			}
+			if persisted.Status != "suppressed" || persisted.SuppressionReason != "source_display_ineligible" ||
+				persisted.SuppressedSourceIDsJSON != test.wantSources || !persisted.SuppressedAt.Equal(now) ||
+				persisted.CatalogRevision != "catalog-test-revision" || persisted.Attempt != 0 || persisted.ConfirmedThrough != 0 {
+				t.Fatalf("suppression audit is incomplete: %#v", persisted)
+			}
+			subscriber, err := reopened.GetSubscriber(ctx, 67)
+			if err != nil || !subscriber.Active {
+				t.Fatalf("suppression changed subscriber: subscriber=%#v err=%v", subscriber, err)
+			}
+			run, items, err := reopened.GetDigestRun(ctx, "digest-policy")
+			if err != nil || run.ID == "" || len(items) != 1 {
+				t.Fatalf("suppression removed audit snapshot: run=%#v items=%#v err=%v", run, items, err)
+			}
+		})
 	}
 }
 
@@ -817,10 +984,12 @@ func seedTwoMessageDelivery(t *testing.T, repository *storage.SQLiteRepository, 
 		{"item 1", repository.SaveDigestItem(ctx, storage.DigestItem{
 			ID: "item-1-" + queued.ID, DigestID: queued.DigestID, StartupName: "Acme One",
 			Summary: strings.Repeat("Alpha ", 450), Rank: 1, SourceURLs: []string{"https://source.example/one"},
+			SourceAttributions: []storage.SourceAttribution{{SourceID: "sample-public", SourceURL: "https://source.example/one"}},
 		})},
 		{"item 2", repository.SaveDigestItem(ctx, storage.DigestItem{
 			ID: "item-2-" + queued.ID, DigestID: queued.DigestID, StartupName: "Acme Two",
 			Summary: strings.Repeat("Beta ", 500), Rank: 2, SourceURLs: []string{"https://source.example/two"},
+			SourceAttributions: []storage.SourceAttribution{{SourceID: "sample-public", SourceURL: "https://source.example/two"}},
 		})},
 		{"delivery", repository.SaveDelivery(ctx, queued)},
 	}
@@ -845,6 +1014,7 @@ func seedDeliveryForSubscriber(
 	item := storage.DigestItem{
 		ID: "item-" + queued.ID, DigestID: queued.DigestID, StartupName: "Acme AI",
 		Summary: "Acme AI launched.", Rank: 1, SourceURLs: []string{"https://source.example/acme"},
+		SourceAttributions: []storage.SourceAttribution{{SourceID: "sample-public", SourceURL: "https://source.example/acme"}},
 	}
 	operations := []struct {
 		action string
@@ -861,6 +1031,50 @@ func seedDeliveryForSubscriber(
 			t.Fatalf("save %s: %v", action, err)
 		}
 	}
+}
+
+func seedDeliveryWithAttribution(
+	t *testing.T,
+	repository *storage.SQLiteRepository,
+	queued storage.Delivery,
+	attributions []storage.SourceAttribution,
+) {
+	t.Helper()
+	ctx := context.Background()
+	operations := []struct {
+		action string
+		err    error
+	}{
+		{"subscriber", repository.SaveSubscriber(ctx, storage.Subscriber{
+			TelegramID: queued.TelegramID, Username: "subscriber", Active: true, CreatedAt: queued.CreatedAt,
+		})},
+		{"digest", repository.SaveDigestRun(ctx, storage.DigestRun{
+			ID: queued.DigestID, DigestDate: queued.DigestDate, Timezone: "UTC", CreatedAt: queued.CreatedAt,
+		})},
+		{"item", repository.SaveDigestItem(ctx, storage.DigestItem{
+			ID: "item-" + queued.ID, DigestID: queued.DigestID, StartupName: "Historic Acme",
+			Summary: "Historic evidence", Rank: 1, SourceAttributions: attributions,
+		})},
+		{"delivery", repository.SaveDelivery(ctx, queued)},
+	}
+	for _, operation := range operations {
+		if operation.err != nil {
+			t.Fatalf("save %s: %v", operation.action, operation.err)
+		}
+	}
+}
+
+type testDisplayPolicy struct {
+	eligible map[string]bool
+	revision string
+}
+
+func (policy testDisplayPolicy) DisplayEligible(sourceID string) bool {
+	return policy.eligible[sourceID]
+}
+
+func (policy testDisplayPolicy) Revision() string {
+	return policy.revision
 }
 
 func requestJSON(t *testing.T, method, url string, payload any) *http.Response {

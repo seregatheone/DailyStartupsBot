@@ -17,6 +17,7 @@ import (
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/config"
 	v1 "github.com/seregatheone/DailyStartupsBot/backend/internal/contracts/v1"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/httpapi"
+	"github.com/seregatheone/DailyStartupsBot/backend/internal/ingestion"
 	"github.com/seregatheone/DailyStartupsBot/backend/internal/storage"
 )
 
@@ -352,7 +353,16 @@ func TestScheduledPipelinePersistsBalancedSourceSelection(t *testing.T) {
 		}
 	}
 
-	cycle, err := app.NewScheduledPipeline(cfg, repository, discardLogger()).RunOnce(ctx, now)
+	registry := ingestion.NewRegistryWithDisplayPolicy(
+		[]ingestion.SourceAdapter{
+			policyAdapter{id: "source-a"},
+			policyAdapter{id: "source-b"},
+			policyAdapter{id: "source-c"},
+		},
+		[]string{"source-a", "source-b", "source-c"},
+		"integration-test",
+	)
+	cycle, err := app.NewScheduledPipelineWithRegistry(cfg, repository, discardLogger(), registry).RunOnce(ctx, now)
 	if err != nil {
 		t.Fatalf("run scheduled pipeline: %v", err)
 	}
@@ -392,7 +402,7 @@ func TestScheduledPipelinePersistsBalancedSourceSelection(t *testing.T) {
 		t.Fatalf("source-aware first pass was not persisted: counts=%v names=%v", sourceCounts, selectedNames)
 	}
 
-	server := httptest.NewServer(httpapi.NewServer(cfg, repository))
+	server := httptest.NewServer(httpapi.NewServerWithRegistry(cfg, repository, registry))
 	t.Cleanup(server.Close)
 	due := getJSON[v1.DueDeliveriesResponse](t, server.Client(), server.URL+"/v1/deliveries/due")
 	if len(due.Deliveries) != 1 {
@@ -409,6 +419,18 @@ func TestScheduledPipelinePersistsBalancedSourceSelection(t *testing.T) {
 			t.Fatalf("rendered delivery lost publisher %s: %s", publisher, combined)
 		}
 	}
+}
+
+type policyAdapter struct {
+	id string
+}
+
+func (adapter policyAdapter) Metadata() ingestion.SourceMetadata {
+	return ingestion.SourceMetadata{ID: adapter.id, AccessMethod: "test"}
+}
+
+func (policyAdapter) Fetch(context.Context, config.SourceConfig) (ingestion.AdapterFetchResult, error) {
+	return ingestion.AdapterFetchResult{}, nil
 }
 
 type preferencesResponse struct {

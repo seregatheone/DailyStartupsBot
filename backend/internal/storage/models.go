@@ -87,15 +87,19 @@ type DigestItem struct {
 }
 
 type Delivery struct {
-	ID               string
-	TelegramID       int64
-	DigestID         string
-	DigestDate       string
-	Status           string
-	Attempt          int
-	ConfirmedThrough int
-	NextAttemptAt    time.Time
-	CreatedAt        time.Time
+	ID                      string
+	TelegramID              int64
+	DigestID                string
+	DigestDate              string
+	Status                  string
+	Attempt                 int
+	ConfirmedThrough        int
+	NextAttemptAt           time.Time
+	CreatedAt               time.Time
+	SuppressionReason       string
+	SuppressedSourceIDsJSON string
+	SuppressedAt            time.Time
+	CatalogRevision         string
 }
 
 type DeliveryAttempt struct {

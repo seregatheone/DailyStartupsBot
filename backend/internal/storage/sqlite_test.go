@@ -397,6 +397,12 @@ CREATE TABLE delivery_queue (
 	must(t, repo.Close())
 	repo, err = OpenSQLite(ctx, dbPath)
 	must(t, err)
+	legacy, err := repo.GetDelivery(ctx, "legacy")
+	must(t, err)
+	if legacy.SuppressionReason != "" || legacy.SuppressedSourceIDsJSON != "" ||
+		!legacy.SuppressedAt.IsZero() || legacy.CatalogRevision != "" {
+		t.Fatalf("migration added non-empty suppression audit: %#v", legacy)
+	}
 	must(t, repo.Close())
 
 	db, err = sql.Open("sqlite", dbPath)
@@ -404,6 +410,10 @@ CREATE TABLE delivery_queue (
 	defer db.Close()
 	assertSQLiteColumnCount(t, db, "delivery_queue", "next_attempt_at", 1)
 	assertSQLiteColumnCount(t, db, "delivery_queue", "confirmed_through", 1)
+	assertSQLiteColumnCount(t, db, "delivery_queue", "suppression_reason", 1)
+	assertSQLiteColumnCount(t, db, "delivery_queue", "suppressed_source_ids_json", 1)
+	assertSQLiteColumnCount(t, db, "delivery_queue", "suppressed_at", 1)
+	assertSQLiteColumnCount(t, db, "delivery_queue", "catalog_revision", 1)
 	assertSQLiteColumnCount(t, db, "delivery_attempts", "sequence", 1)
 
 	var status string
@@ -575,6 +585,222 @@ func TestListDueDeliveriesOrdersSubsecondTimestampsChronologically(t *testing.T)
 	assertEqual(t, []Delivery{earlier, later}, got)
 }
 
+func TestSuppressDeliveryPersistsAuditAndProgressAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "suppression.db")
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	suppressedAt := now.Add(5 * time.Minute)
+
+	repo, err := OpenSQLite(ctx, dbPath)
+	must(t, err)
+	seedSubscriberAndDigest(t, repo, 42, true, "digest-suppressed", now)
+	must(t, repo.SaveDigestItem(ctx, DigestItem{
+		ID: "item-suppressed", DigestID: "digest-suppressed", StartupName: "Historic startup", Rank: 1,
+		SourceAttributions: []SourceAttribution{{SourceID: "techcrunch-startups", SourceURL: "https://example.test/item"}},
+	}))
+	must(t, repo.SaveSourceHealth(ctx, SourceHealth{
+		SourceID: "techcrunch-startups", Status: "ok", LastIngestionAt: now,
+	}))
+	delivery := Delivery{
+		ID: "delivery-suppressed", TelegramID: 42, DigestID: "digest-suppressed",
+		DigestDate: "2026-07-10", Status: "retry", Attempt: 2, ConfirmedThrough: 1,
+		NextAttemptAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	must(t, repo.SaveDelivery(ctx, delivery))
+	priorAttempt := DeliveryAttempt{
+		ID: "prior-success", DeliveryID: delivery.ID, AttemptedAt: now, Status: "success",
+		Sequence: 1, TelegramMessageID: "101",
+	}
+	must(t, repo.SaveDeliveryAttempt(ctx, priorAttempt))
+
+	updated, applied, err := repo.SuppressDelivery(
+		ctx, delivery.ID, 2, 1, "source_display_ineligible",
+		[]string{"techcrunch-startups", " eu-startups ", "techcrunch-startups"},
+		suppressedAt, "catalog-2026-07-11",
+	)
+	must(t, err)
+	if !applied || updated.Status != "suppressed" || updated.Attempt != 2 ||
+		updated.ConfirmedThrough != 1 || !updated.NextAttemptAt.IsZero() ||
+		updated.SuppressionReason != "source_display_ineligible" ||
+		updated.SuppressedSourceIDsJSON != `["eu-startups","techcrunch-startups"]` ||
+		!updated.SuppressedAt.Equal(suppressedAt) || updated.CatalogRevision != "catalog-2026-07-11" {
+		t.Fatalf("unexpected suppressed delivery: applied=%v delivery=%#v", applied, updated)
+	}
+	replayed, applied, err := repo.SuppressDelivery(
+		ctx, delivery.ID, 2, 1, "source_display_ineligible",
+		[]string{"eu-startups", "techcrunch-startups"}, suppressedAt, "catalog-2026-07-11",
+	)
+	must(t, err)
+	if applied || !reflect.DeepEqual(replayed, updated) {
+		t.Fatalf("suppression replay was not idempotent: applied=%v delivery=%#v", applied, replayed)
+	}
+	revival := delivery
+	revival.Status = "due"
+	revival.Attempt = 0
+	revival.ConfirmedThrough = 0
+	must(t, repo.SaveDelivery(ctx, revival))
+	stillSuppressed, err := repo.GetDelivery(ctx, delivery.ID)
+	must(t, err)
+	if !reflect.DeepEqual(stillSuppressed, updated) {
+		t.Fatalf("queue upsert revived suppressed delivery: before=%#v after=%#v", updated, stillSuppressed)
+	}
+	_, _, err = repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+		ID: "attempt-after-suppression", DeliveryID: delivery.ID, AttemptedAt: suppressedAt.Add(time.Second),
+		Status: "failed", Sequence: 2,
+	}, DeliveryTransition{
+		ExpectedAttempt: 2, ExpectedConfirmedThrough: 1, TotalMessages: 2,
+		Status: "failed", Attempt: 3, ConfirmedThrough: 1,
+	})
+	if !errors.Is(err, ErrDeliveryTerminal) {
+		t.Fatalf("suppressed delivery accepted a send attempt: %v", err)
+	}
+	due, err := repo.ListDueDeliveries(ctx, now.Add(2*time.Hour))
+	must(t, err)
+	if len(due) != 0 {
+		t.Fatalf("suppressed delivery remained due: %#v", due)
+	}
+	must(t, repo.Close())
+
+	reopened, err := OpenSQLite(ctx, dbPath)
+	must(t, err)
+	defer reopened.Close()
+	restored, err := reopened.GetDelivery(ctx, delivery.ID)
+	must(t, err)
+	assertEqual(t, updated, restored)
+	attempts, err := reopened.ListDeliveryAttempts(ctx, delivery.ID)
+	must(t, err)
+	assertEqual(t, []DeliveryAttempt{priorAttempt}, attempts)
+	subscriber, err := reopened.GetSubscriber(ctx, delivery.TelegramID)
+	must(t, err)
+	if !subscriber.Active {
+		t.Fatal("policy suppression deactivated subscriber")
+	}
+	run, items, err := reopened.GetDigestRun(ctx, delivery.DigestID)
+	must(t, err)
+	if run.ID != delivery.DigestID || len(items) != 1 || items[0].ID != "item-suppressed" {
+		t.Fatalf("suppression changed digest audit rows: run=%#v items=%#v", run, items)
+	}
+	health, err := reopened.GetHealthSnapshot(ctx, 10)
+	must(t, err)
+	if health.Degraded || len(health.RecentFailures) != 0 {
+		t.Fatalf("policy suppression was reported as delivery failure: %#v", health)
+	}
+}
+
+func TestSuppressDeliveryRejectsStaleAndTerminalStateWithoutAuditWrite(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+
+	t.Run("stale cursor", func(t *testing.T) {
+		repo := openTestRepository(t)
+		delivery := seedDelivery(t, repo, 1, "stale-suppression", "retry", now)
+		delivery.Attempt = 1
+		delivery.ConfirmedThrough = 2
+		must(t, repo.SaveDelivery(ctx, delivery))
+
+		_, applied, err := repo.SuppressDelivery(
+			ctx, delivery.ID, 1, 1, "source_display_ineligible",
+			[]string{"eu-startups"}, now, "catalog-v1",
+		)
+		if applied || !errors.Is(err, ErrDeliveryConflict) {
+			t.Fatalf("expected stale suppression conflict: applied=%v err=%v", applied, err)
+		}
+		persisted, err := repo.GetDelivery(ctx, delivery.ID)
+		must(t, err)
+		if persisted.Status != "retry" || persisted.SuppressionReason != "" ||
+			persisted.SuppressedSourceIDsJSON != "" || !persisted.SuppressedAt.IsZero() {
+			t.Fatalf("stale suppression wrote audit state: %#v", persisted)
+		}
+	})
+
+	for _, status := range []string{"sent", "failed", "blocked"} {
+		t.Run(status, func(t *testing.T) {
+			repo := openTestRepository(t)
+			delivery := seedDelivery(t, repo, 1, "terminal-suppression-"+status, status, now)
+			_, applied, err := repo.SuppressDelivery(
+				ctx, delivery.ID, 0, 0, "source_display_ineligible",
+				[]string{"innovate-uk"}, now, "catalog-v1",
+			)
+			if applied || !errors.Is(err, ErrDeliveryTerminal) {
+				t.Fatalf("expected terminal suppression error: applied=%v err=%v", applied, err)
+			}
+			persisted, err := repo.GetDelivery(ctx, delivery.ID)
+			must(t, err)
+			if persisted.Status != status || persisted.SuppressionReason != "" {
+				t.Fatalf("terminal delivery changed: %#v", persisted)
+			}
+		})
+	}
+}
+
+func TestSuppressDeliveryRacesTerminalSendAtomically(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	delivery := seedDelivery(t, repo, 1, "suppression-race", "due", now)
+
+	type raceResult struct {
+		operation string
+		applied   bool
+		err       error
+	}
+	start := make(chan struct{})
+	results := make(chan raceResult, 2)
+	go func() {
+		<-start
+		_, applied, err := repo.SuppressDelivery(
+			ctx, delivery.ID, 0, 0, "source_display_ineligible",
+			[]string{"eu-startups"}, now, "catalog-v1",
+		)
+		results <- raceResult{operation: "suppress", applied: applied, err: err}
+	}()
+	go func() {
+		<-start
+		_, _, err := repo.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+			ID: "racing-success", DeliveryID: delivery.ID, AttemptedAt: now,
+			Status: "success", Sequence: 1, TelegramMessageID: "101",
+		}, DeliveryTransition{
+			ExpectedAttempt: 0, ExpectedConfirmedThrough: 0, TotalMessages: 1,
+			Status: "sent", Attempt: 1, ConfirmedThrough: 1,
+		})
+		results <- raceResult{operation: "send", applied: err == nil, err: err}
+	}()
+	close(start)
+	first, second := <-results, <-results
+
+	succeeded, terminal := 0, 0
+	for _, result := range []raceResult{first, second} {
+		switch {
+		case result.err == nil && result.applied:
+			succeeded++
+		case errors.Is(result.err, ErrDeliveryTerminal):
+			terminal++
+		default:
+			t.Fatalf("unexpected %s race result: applied=%v err=%v", result.operation, result.applied, result.err)
+		}
+	}
+	if succeeded != 1 || terminal != 1 {
+		t.Fatalf("race was not exclusive: first=%#v second=%#v", first, second)
+	}
+	persisted, err := repo.GetDelivery(ctx, delivery.ID)
+	must(t, err)
+	attempts, err := repo.ListDeliveryAttempts(ctx, delivery.ID)
+	must(t, err)
+	switch persisted.Status {
+	case "suppressed":
+		if persisted.Attempt != 0 || persisted.ConfirmedThrough != 0 || len(attempts) != 0 {
+			t.Fatalf("suppression race partially sent delivery: delivery=%#v attempts=%#v", persisted, attempts)
+		}
+	case "sent":
+		if persisted.Attempt != 1 || persisted.ConfirmedThrough != 1 || len(attempts) != 1 ||
+			persisted.SuppressionReason != "" {
+			t.Fatalf("send race partially suppressed delivery: delivery=%#v attempts=%#v", persisted, attempts)
+		}
+	default:
+		t.Fatalf("race left nonterminal delivery: %#v", persisted)
+	}
+}
+
 func TestRecordDeliveryAttemptIsIdempotentBeforeTerminalCheck(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
@@ -735,7 +961,7 @@ func TestRecordDeliveryMessageProgressRetriesAndCompletesWithoutRewind(t *testin
 	}
 	replayed, duplicate, err = repo.RecordDeliveryAttempt(ctx, final, finalTransition)
 	must(t, err)
-	if !duplicate || replayed != updated {
+	if !duplicate || !reflect.DeepEqual(replayed, updated) {
 		t.Fatalf("terminal replay was not idempotent: delivery=%#v duplicate=%v", replayed, duplicate)
 	}
 

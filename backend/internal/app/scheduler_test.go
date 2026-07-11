@@ -78,7 +78,9 @@ func TestScheduledPipelinePersistsPersonalizedDigestsAndDeduplicates(t *testing.
 	cfg.IngestionTime = "07:00"
 	cfg.DeliveryTime = "09:00"
 	cfg.Sources = nil
-	pipeline := NewScheduledPipeline(cfg, repository, testLogger())
+	pipeline := NewScheduledPipelineWithRegistry(
+		cfg, repository, testLogger(), eligibleSchedulerRegistry(schedulerAdapter{id: "source"}),
+	)
 	pipeline.lastIngestionRun = now
 
 	first, err := pipeline.RunOnce(ctx, now)
@@ -137,6 +139,132 @@ func TestScheduledPipelinePersistsPersonalizedDigestsAndDeduplicates(t *testing.
 	}
 }
 
+func TestScheduledPipelineFiltersDisplayIneligibleSignalsBeforeGrouping(t *testing.T) {
+	ctx := context.Background()
+	repository, err := storage.OpenSQLite(ctx, filepath.Join(t.TempDir(), "display-eligibility.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+
+	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	seedSubscription(t, repository, storage.Subscriber{TelegramID: 67, Active: true, CreatedAt: now}, storage.Preferences{
+		TelegramID: 67, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 10,
+	})
+	for _, signal := range []storage.StartupSignal{
+		{
+			ID: "eligible-shared", StartupName: "Eligible Co", CanonicalURL: "https://eligible.example",
+			SourceID: "eligible", SourceURL: "https://eligible.example/news", SignalType: "launch",
+			PublishedAt: now.Add(-2 * time.Hour), Description: "Eligible summary",
+		},
+		{
+			ID: "revoked-shared", StartupName: "Eligible Co", CanonicalURL: "https://eligible.example",
+			SourceID: "revoked", SourceURL: "https://revoked.example/news", SignalType: "funding",
+			PublishedAt: now.Add(-time.Hour), Description: "Revoked summary must not survive grouping",
+		},
+		{
+			ID: "unknown-only", StartupName: "Unknown Co", CanonicalURL: "https://unknown.example",
+			SourceID: "unknown", SourceURL: "https://unknown.example/news", SignalType: "launch",
+			PublishedAt: now.Add(-30 * time.Minute), Description: "Unknown summary",
+		},
+	} {
+		if err := repository.SaveStartupSignal(ctx, signal); err != nil {
+			t.Fatalf("save signal %s: %v", signal.ID, err)
+		}
+	}
+
+	cfg := config.Default()
+	cfg.DryRun = false
+	cfg.Timezone = "UTC"
+	cfg.IngestionTime = "23:59"
+	cfg.DeliveryTime = "09:00"
+	registry := eligibleSchedulerRegistry(schedulerAdapter{id: "eligible"})
+	pipeline := NewScheduledPipelineWithRegistry(cfg, repository, testLogger(), registry)
+	pipeline.lastIngestionRun = now
+
+	result, err := pipeline.RunOnce(ctx, now)
+	if err != nil || result.Queued != 1 {
+		t.Fatalf("run scheduled generation: result=%#v err=%v", result, err)
+	}
+	due, err := repository.ListDueDeliveries(ctx, now)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("list due delivery: due=%#v err=%v", due, err)
+	}
+	run, items, err := repository.GetDigestRun(ctx, due[0].DigestID)
+	if err != nil {
+		t.Fatalf("load generated digest: %v", err)
+	}
+	if run.CandidateCount != 1 || len(items) != 1 {
+		t.Fatalf("display-ineligible candidates affected snapshot: run=%#v items=%#v", run, items)
+	}
+	item := items[0]
+	if item.StartupName != "Eligible Co" || item.Summary != "Eligible summary" ||
+		len(item.SourceAttributions) != 1 || item.SourceAttributions[0].SourceID != "eligible" {
+		t.Fatalf("eligible side of grouped candidate was not preserved: %#v", item)
+	}
+	if strings.Contains(item.Summary, "Revoked") {
+		t.Fatalf("revoked signal metadata survived grouping: %#v", item)
+	}
+	stored, err := repository.ListStartupSignals(ctx, now.Add(-24*time.Hour), now.Add(time.Hour))
+	if err != nil || len(stored) != 3 {
+		t.Fatalf("display filtering mutated audit signals: signals=%#v err=%v", stored, err)
+	}
+}
+
+func TestScheduledPipelinePersistsFreshEmptyDigestWhenNoSignalIsDisplayEligible(t *testing.T) {
+	ctx := context.Background()
+	repository, err := storage.OpenSQLite(ctx, filepath.Join(t.TempDir(), "display-empty.db"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	defer repository.Close()
+
+	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	seedSubscription(t, repository, storage.Subscriber{TelegramID: 68, Active: true, CreatedAt: now}, storage.Preferences{
+		TelegramID: 68, DeliveryTime: "09:00", Timezone: "UTC", MaxItems: 10,
+	})
+	for _, signal := range []storage.StartupSignal{
+		{
+			ID: "revoked", StartupName: "Revoked Co", SourceID: "revoked",
+			SourceURL: "https://revoked.example/news", SignalType: "launch", PublishedAt: now.Add(-time.Hour),
+		},
+		{
+			ID: "unknown", StartupName: "Unknown Co", SourceID: "unknown",
+			SourceURL: "https://unknown.example/news", SignalType: "launch", PublishedAt: now.Add(-30 * time.Minute),
+		},
+	} {
+		if err := repository.SaveStartupSignal(ctx, signal); err != nil {
+			t.Fatalf("save signal %s: %v", signal.ID, err)
+		}
+	}
+
+	cfg := config.Default()
+	cfg.DryRun = false
+	cfg.Timezone = "UTC"
+	cfg.IngestionTime = "23:59"
+	cfg.DeliveryTime = "09:00"
+	pipeline := NewScheduledPipelineWithRegistry(
+		cfg, repository, testLogger(), eligibleSchedulerRegistry(schedulerAdapter{id: "eligible"}),
+	)
+	pipeline.lastIngestionRun = now
+
+	result, err := pipeline.RunOnce(ctx, now)
+	if err != nil || result.Queued != 1 {
+		t.Fatalf("run empty scheduled generation: result=%#v err=%v", result, err)
+	}
+	due, err := repository.ListDueDeliveries(ctx, now)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("list empty digest delivery: due=%#v err=%v", due, err)
+	}
+	run, items, err := repository.GetDigestRun(ctx, due[0].DigestID)
+	if err != nil {
+		t.Fatalf("load empty digest: %v", err)
+	}
+	if run.CandidateCount != 0 || len(items) != 0 {
+		t.Fatalf("ineligible signals leaked into fresh empty digest: run=%#v items=%#v", run, items)
+	}
+}
+
 func TestScheduledPipelineIsolatesSourceFailureAndRunsNextDay(t *testing.T) {
 	ctx := context.Background()
 	repository, err := storage.OpenSQLite(ctx, filepath.Join(t.TempDir(), "ingestion.db"))
@@ -152,14 +280,14 @@ func TestScheduledPipelineIsolatesSourceFailureAndRunsNextDay(t *testing.T) {
 		{ID: "failed", Active: true, AccessMethod: "api"},
 		{ID: "healthy", Active: true, AccessMethod: "api"},
 	}
-	pipeline := NewScheduledPipeline(cfg, repository, testLogger())
-	pipeline.ingestor = ingestion.NewService(ingestion.NewRegistry(
+	registry := eligibleSchedulerRegistry(
 		schedulerAdapter{id: "failed", err: errors.New("source unavailable")},
 		schedulerAdapter{id: "healthy", records: []ingestion.SourceRecord{{
 			StartupName: "Healthy Co", SourceURL: "https://source.example/healthy",
 			SignalType: "launch", PublishedAt: time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC),
 		}}},
-	), repository)
+	)
+	pipeline := NewScheduledPipelineWithRegistry(cfg, repository, testLogger(), registry)
 
 	first, err := pipeline.RunOnce(ctx, time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC))
 	if err != nil {
@@ -209,13 +337,13 @@ func TestScheduledPipelineDoesNotPublishPartialDigestAfterIngestionStorageFailur
 	cfg.IngestionTime = "07:00"
 	cfg.DeliveryTime = "09:00"
 	cfg.Sources = []config.SourceConfig{{ID: "source", Active: true, AccessMethod: "api"}}
-	pipeline := NewScheduledPipeline(cfg, repository, testLogger())
-	pipeline.ingestor = ingestion.NewService(ingestion.NewRegistry(schedulerAdapter{
+	registry := eligibleSchedulerRegistry(schedulerAdapter{
 		id: "source", records: []ingestion.SourceRecord{{
 			StartupName: "Retry Co", SourceURL: "https://source.example/retry",
 			SignalType: "launch", PublishedAt: now.Add(-time.Hour),
 		}},
-	}), repository)
+	})
+	pipeline := NewScheduledPipelineWithRegistry(cfg, repository, testLogger(), registry)
 
 	first, err := pipeline.RunOnce(ctx, now)
 	if err == nil || first.Queued != 0 || first.Failed != 1 {
@@ -300,7 +428,7 @@ func TestScheduledPipelinePreservesSourceCadenceAcrossRestart(t *testing.T) {
 	}
 	defer repository.Close()
 	attempts := 0
-	registry := ingestion.NewRegistry(schedulerAdapter{id: "source", attempts: &attempts})
+	registry := eligibleSchedulerRegistry(schedulerAdapter{id: "source", attempts: &attempts})
 	cfg := config.Default()
 	cfg.DryRun = false
 	cfg.Timezone = "UTC"
@@ -359,6 +487,16 @@ func seedSubscription(
 			t.Fatalf("deactivate subscriber %d: %v", subscriber.TelegramID, err)
 		}
 	}
+}
+
+func eligibleSchedulerRegistry(adapters ...schedulerAdapter) ingestion.Registry {
+	sourceAdapters := make([]ingestion.SourceAdapter, 0, len(adapters))
+	sourceIDs := make([]string, 0, len(adapters))
+	for _, adapter := range adapters {
+		sourceAdapters = append(sourceAdapters, adapter)
+		sourceIDs = append(sourceIDs, adapter.id)
+	}
+	return ingestion.NewRegistryWithDisplayPolicy(sourceAdapters, sourceIDs, "scheduler-test")
 }
 
 type schedulerAdapter struct {

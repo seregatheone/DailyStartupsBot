@@ -3,6 +3,7 @@ package ingestion
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -41,6 +42,34 @@ func TestFeedAdapterHandlesEmptyAndPartialFeeds(t *testing.T) {
 	partial := fetchFixture(t, "partial-rss.xml", "application/rss+xml", equivalentMapper)
 	if len(partial.Records) != 1 || partial.Records[0].StartupName != "ValidCo" || partial.Skipped != 1 {
 		t.Fatalf("invalid item was not isolated: %#v", partial)
+	}
+}
+
+func TestPublicIPPolicyRejectsLocalAndPrivateNetworks(t *testing.T) {
+	for _, raw := range []string{
+		"127.0.0.1", "::1", "10.0.0.1", "172.16.0.1", "192.168.1.1",
+		"169.254.1.1", "100.64.0.1", "192.0.2.1", "198.18.0.1", "198.51.100.1",
+		"203.0.113.1", "240.0.0.1", "fe80::1", "ff02::1", "2001:db8::1", "0.0.0.0",
+	} {
+		t.Run("reject "+raw, func(t *testing.T) {
+			if IsPublicIP(net.ParseIP(raw)) {
+				t.Fatalf("non-public IP was accepted: %s", raw)
+			}
+		})
+	}
+	for _, raw := range []string{"8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"} {
+		t.Run("allow "+raw, func(t *testing.T) {
+			if !IsPublicIP(net.ParseIP(raw)) {
+				t.Fatalf("public IP was rejected: %s", raw)
+			}
+		})
+	}
+}
+
+func TestProductionFeedTransportDisablesProxyAndUsesSafeDialer(t *testing.T) {
+	transport, ok := safeFeedTransport(nil).(*http.Transport)
+	if !ok || transport.Proxy != nil || transport.DialContext == nil {
+		t.Fatalf("production transport does not enforce direct safe dialing: %#v", transport)
 	}
 }
 

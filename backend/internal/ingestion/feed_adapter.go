@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -105,6 +106,16 @@ var (
 	errRedirectPolicy  = errors.New("feed redirect policy rejected request")
 	feedDangerousBlock = regexp.MustCompile(`(?is)<(script|style)\b[^>]*>.*?</(script|style)\s*>`)
 	feedMarkup         = regexp.MustCompile(`<[^>]+>`)
+	nonPublicPrefixes  = []netip.Prefix{
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("198.18.0.0/15"),
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
 )
 
 func NewFeedAdapter(options FeedAdapterOptions) (*FeedAdapter, error) {
@@ -168,10 +179,7 @@ func NewFeedAdapter(options FeedAdapterOptions) (*FeedAdapter, error) {
 		allowedContentTypes[contentType] = struct{}{}
 	}
 	userAgent := strings.TrimSpace(options.UserAgent)
-	transport := http.DefaultTransport
-	if options.Transport != nil {
-		transport = options.Transport
-	}
+	transport := safeFeedTransport(options.Transport)
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   options.Timeout,
@@ -738,4 +746,69 @@ func isAllowedFeedURL(parsed *url.URL, allowedHosts map[string]struct{}) bool {
 func isSafeRecordURL(raw string, allowedHosts map[string]struct{}) bool {
 	parsed, err := parseHTTPSURL(raw)
 	return err == nil && isAllowedFeedURL(parsed, allowedHosts)
+}
+
+func safeFeedTransport(override http.RoundTripper) http.RoundTripper {
+	if override != nil {
+		return override
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	transport := base.Clone()
+	transport.Proxy = nil
+	transport.DialContext = safePublicDialContext
+	return transport
+}
+
+func safePublicDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, errors.New("feed source network address is invalid")
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addresses) == 0 {
+		return nil, errors.New("feed source host resolution failed")
+	}
+	for _, address := range addresses {
+		if !IsPublicIP(address.IP) {
+			return nil, errors.New("feed source resolved to a non-public address")
+		}
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(addresses[0].IP.String(), port))
+}
+
+func isPublicHTTPSURL(parsed *url.URL) bool {
+	if parsed == nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return false
+	}
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "" || hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") ||
+		strings.HasSuffix(hostname, ".local") {
+		return false
+	}
+	if ip := net.ParseIP(hostname); ip != nil {
+		return IsPublicIP(ip)
+	}
+	return true
+}
+
+func IsPublicIP(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range nonPublicPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
 }
