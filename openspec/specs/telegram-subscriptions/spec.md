@@ -555,4 +555,3 @@ The bot SHALL preserve the backend digest renderer's HTML parse mode when sendin
 
 - **WHEN** start, help, subscribe, unsubscribe, status, preferences or unknown command produces a reply
 - **THEN** the existing plain-text transport behavior is unchanged
-

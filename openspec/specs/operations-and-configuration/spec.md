@@ -397,4 +397,3 @@ The project SHALL provide an opt-in bounded acceptance run that exercises schedu
 
 - **WHEN** required Telegram credentials, test recipient, or approved-source network access is unavailable
 - **THEN** the run fails closed with a non-secret prerequisite error and does not report acceptance success
-

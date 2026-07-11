@@ -225,4 +225,3 @@ The system SHALL select deduplicated startup candidates in a deterministic sourc
 
 - **WHEN** a scheduled digest is generated after cross-source grouping
 - **THEN** its persisted run records the exact unique candidate count before source-aware selection and item limiting, and every selected item records its authoritative grouped candidate identity
-
