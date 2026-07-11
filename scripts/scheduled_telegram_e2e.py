@@ -590,12 +590,9 @@ def _parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run the isolated scheduled delivery E2E")
     run.add_argument(
         "--timeout-seconds",
-        type=float,
-        default=float(
-            os.environ.get(
-                "DAILY_STARTUPS_SCHEDULED_E2E_TIMEOUT_SECONDS",
-                str(DEFAULT_TIMEOUT_SECONDS),
-            )
+        default=os.environ.get(
+            "DAILY_STARTUPS_SCHEDULED_E2E_TIMEOUT_SECONDS",
+            str(DEFAULT_TIMEOUT_SECONDS),
         ),
     )
     run.add_argument(
@@ -612,7 +609,16 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command == "worker":
         return run_delivery_worker()
-    receipt = run_scheduled_e2e(timeout_seconds=arguments.timeout_seconds)
+    try:
+        timeout_seconds = float(arguments.timeout_seconds)
+    except (TypeError, ValueError):
+        receipt = ScheduledReceipt(
+            finished_at=_utc_now(),
+            status="fail",
+            failure={"step": "configuration", "kind": "invalid_timeout"},
+        )
+    else:
+        receipt = run_scheduled_e2e(timeout_seconds=timeout_seconds)
     write_private_receipt(Path(arguments.receipt), receipt.as_dict())
     print(
         json.dumps(

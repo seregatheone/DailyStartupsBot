@@ -52,6 +52,35 @@ class ScheduledTelegramE2ETests(unittest.TestCase):
         )
         self.assertNotIn("fixture-token", result.stdout + result.stderr)
 
+    def test_direct_script_entrypoint_records_invalid_timeout(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "receipt.json"
+            environment = dict(os.environ)
+            environment["DAILY_STARTUPS_SCHEDULED_E2E_TIMEOUT_SECONDS"] = "invalid"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(root / "scripts" / "scheduled_telegram_e2e.py"),
+                    "run",
+                    "--receipt",
+                    str(receipt),
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            payload["failure"],
+            {"step": "configuration", "kind": "invalid_timeout"},
+        )
+
     def test_telegram_id_is_required_and_positive(self) -> None:
         self.assertEqual(_telegram_id({"DAILY_STARTUPS_E2E_TELEGRAM_ID": "42"}), 42)
         for value in ("", "nope", "0", "-1"):
