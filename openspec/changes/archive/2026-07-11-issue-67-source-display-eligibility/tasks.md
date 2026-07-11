@@ -22,4 +22,4 @@
 
 - [x] 4.1 Wire one registry policy into backend preview, scheduler, and due-delivery paths without changing public APIs or dry-run behavior
 - [x] 4.2 Run focused backend tests, `make test`, `go vet ./...`, `go test -race ./...`, and strict OpenSpec validation
-- [ ] 4.3 Run finalize and acceptance, resolve blocking findings, sync specs, and archive this change on the same branch
+- [x] 4.3 Run finalize and acceptance, resolve blocking findings, sync specs, and archive this change on the same branch
