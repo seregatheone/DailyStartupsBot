@@ -61,6 +61,9 @@ func selectSourceAware(ranked []Item, limit int) []Item {
 	if len(ranked) == 0 || limit <= 0 {
 		return nil
 	}
+	if len(ranked) <= limit {
+		return ranked
+	}
 
 	selected := make([]bool, len(ranked))
 	selectedCount := 0
