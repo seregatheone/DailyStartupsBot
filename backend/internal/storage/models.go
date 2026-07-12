@@ -75,12 +75,23 @@ type SourceAttribution struct {
 	SourceURL string `json:"source_url"`
 }
 
+type DigestFunding struct {
+	Round     string   `json:"round,omitempty"`
+	Amount    string   `json:"amount,omitempty"`
+	Currency  string   `json:"currency,omitempty"`
+	Investors []string `json:"investors,omitempty"`
+}
+
 type DigestItem struct {
 	ID                 string
 	DigestID           string
 	CandidateIdentity  string
 	StartupName        string
 	Summary            string
+	SignalType         string
+	Region             string
+	Categories         []string
+	Funding            DigestFunding
 	Rank               int
 	SourceURLs         []string
 	SourceAttributions []SourceAttribution

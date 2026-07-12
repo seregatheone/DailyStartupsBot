@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -407,13 +408,21 @@ func TestScheduledDigestSnapshotPreservesStructuredSourceAttribution(t *testing.
 	run, items := scheduledDigestSnapshot(42, time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC), digest.Digest{
 		Date: "2026-07-10", Timezone: "UTC", CandidateCount: 7,
 		Items: []digest.Item{{
-			StartupName: "Acme", Description: "Launch",
+			StartupName: "Acme", Description: "Launch", SignalType: "funding", Region: "EU",
+			Categories: []string{"AI"},
+			Funding: digest.FundingInfo{
+				Round: "Seed", Amount: "5 million", Currency: "EUR", Investors: []string{"Northwind"},
+			},
 			Sources: []digest.SourceAttribution{{
 				SourceID: "innovate-uk", SourceURL: "https://www.gov.uk/government/news/acme",
 			}},
 		}},
 	})
 	if run.ID == "" || run.CandidateCount != 7 || len(items) != 1 || len(items[0].SourceAttributions) != 1 ||
+		items[0].SignalType != "funding" || items[0].Region != "EU" ||
+		!reflect.DeepEqual(items[0].Categories, []string{"AI"}) ||
+		items[0].Funding.Round != "Seed" || items[0].Funding.Amount != "5 million" ||
+		items[0].Funding.Currency != "EUR" || !reflect.DeepEqual(items[0].Funding.Investors, []string{"Northwind"}) ||
 		items[0].SourceAttributions[0].SourceID != "innovate-uk" ||
 		items[0].SourceAttributions[0].SourceURL != "https://www.gov.uk/government/news/acme" {
 		t.Fatalf("structured attribution was not snapshotted: run=%#v items=%#v", run, items)

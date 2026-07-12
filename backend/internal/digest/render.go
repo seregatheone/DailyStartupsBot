@@ -46,7 +46,16 @@ func (generator Generator) StoredDeliveryMessages(run storage.DigestRun, storedI
 		digestItems = append(digestItems, Item{
 			StartupName: stored.StartupName,
 			Description: stored.Summary,
-			Sources:     sources,
+			SignalType:  stored.SignalType,
+			Region:      stored.Region,
+			Categories:  append([]string(nil), stored.Categories...),
+			Funding: FundingInfo{
+				Round:     stored.Funding.Round,
+				Amount:    stored.Funding.Amount,
+				Currency:  stored.Funding.Currency,
+				Investors: append([]string(nil), stored.Funding.Investors...),
+			},
+			Sources: sources,
 		})
 	}
 
@@ -155,8 +164,11 @@ func formatDigestDate(value string) string {
 
 func renderOversizedItem(index int, item Item, limit int) string {
 	plain := fmt.Sprintf("%d. %s", index, item.StartupName)
-	if item.Description != "" {
-		plain += "\n" + item.Description
+	if interest := whyInterestingText(item); interest != "" {
+		plain += "\nПочему интересно: " + interest
+	}
+	if description := plainDescription(item); description != "" {
+		plain += "\nОписание: " + description
 	}
 	return escapeAndTruncate(plain, limit)
 }
@@ -188,8 +200,11 @@ func renderItem(index int, item Item) string {
 	parts := []string{
 		fmt.Sprintf("%d. <b>%s</b>", index, html.EscapeString(item.StartupName)),
 	}
-	if item.Description != "" {
-		parts = append(parts, "<i>"+html.EscapeString(item.Description)+"</i>")
+	if description := renderDescription(item); description != "" {
+		parts = append(parts, description)
+	}
+	if interest := renderWhyInteresting(item); interest != "" {
+		parts = append(parts, interest)
 	}
 	details := renderDetails(item)
 	if details != "" {
@@ -208,10 +223,10 @@ func renderDetails(item Item) string {
 		details = append(details, "📣 Сигнал: "+html.EscapeString(displaySignalType(item.SignalType)))
 	}
 	if item.Region != "" {
-		details = append(details, "🌍 Регион: "+html.EscapeString(item.Region))
+		details = append(details, "🌍 Регион: "+html.EscapeString(displayRegion(item.Region)))
 	}
 	if len(item.Categories) > 0 {
-		details = append(details, "🏷 Категории: "+html.EscapeString(strings.Join(item.Categories, ", ")))
+		details = append(details, "🏷 Категории: "+html.EscapeString(strings.Join(displayCategories(item.Categories), ", ")))
 	}
 	if funding := renderFunding(item.Funding); funding != "" {
 		details = append(details, funding)
@@ -230,6 +245,12 @@ func displaySignalType(signalType string) string {
 		return "новость"
 	case "funding":
 		return "финансирование"
+	case "acquisition":
+		return "приобретение"
+	case "award":
+		return "награда"
+	case "ranking":
+		return "рейтинг"
 	default:
 		return strings.TrimSpace(signalType)
 	}
@@ -238,7 +259,7 @@ func displaySignalType(signalType string) string {
 func renderFunding(funding FundingInfo) string {
 	var parts []string
 	if funding.Round != "" {
-		parts = append(parts, html.EscapeString(funding.Round))
+		parts = append(parts, html.EscapeString(displayFundingRound(funding.Round)))
 	}
 	if funding.Amount != "" {
 		amount := html.EscapeString(funding.Amount)

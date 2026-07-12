@@ -403,11 +403,13 @@ func TestRenderUsesRussianVisualHierarchyAndEscapesSourceData(t *testing.T) {
 		"🚀 <b>Стартапы дня</b>",
 		"<i>10 июля 2026 · Europe/Moscow</i>",
 		"1. <b>Acme &amp; &lt;AI&gt;</b>",
-		"<i>Помогает командам &lt;быстрее&gt;</i>",
+		"📝 <b>Описание:</b> Помогает командам &lt;быстрее&gt;",
+		"💡 <b>Почему интересно:</b> Свежий запуск показывает, что продукт уже представлен рынку.",
+		"Компания привлекла финансирование (посевной раунд, 5000000 USD, инвесторы: Northwind)",
 		"📣 Сигнал: запуск",
-		"🌍 Регион: EU",
-		"🏷 Категории: AI, SaaS",
-		"💰 Финансирование: Seed, 5000000 USD",
+		"🌍 Регион: Европа",
+		"🏷 Категории: ИИ, SaaS",
+		"💰 Финансирование: посевной раунд, 5000000 USD",
 		"👥 Инвесторы: Northwind",
 		`🔗 Источники: <a href="https://source.example/acme?a=1&amp;b=2">rss &amp; news</a>`,
 	}
@@ -419,6 +421,130 @@ func TestRenderUsesRussianVisualHierarchyAndEscapesSourceData(t *testing.T) {
 	if strings.Contains(text, "Daily startup digest") || strings.Contains(text, "2026-07-10") ||
 		strings.Contains(text, "<быстрее>") {
 		t.Fatalf("render contains legacy or unescaped text: %s", text)
+	}
+}
+
+func TestRenderSynthesizesRussianDescriptionAndPreservesUnknownTerms(t *testing.T) {
+	text := (Generator{}).RenderMessages(Digest{Items: []Item{{
+		StartupName: "Novel",
+		SignalType:  "launch",
+		Region:      "Mars <Colony>",
+		Categories:  []string{"AI", "Quantum <Tools>"},
+	}}})[0].Text
+
+	want := []string{
+		"📝 <b>Описание:</b> Стартап: сфера — ИИ, Quantum &lt;Tools&gt;; регион — Mars &lt;Colony&gt;.",
+		"💡 <b>Почему интересно:</b>",
+		"🌍 Регион: Mars &lt;Colony&gt;",
+		"🏷 Категории: ИИ, Quantum &lt;Tools&gt;",
+	}
+	for _, expected := range want {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in rendered digest:\n%s", expected, text)
+		}
+	}
+	if strings.Contains(text, "unknown") {
+		t.Fatalf("render invented an unknown placeholder: %s", text)
+	}
+}
+
+func TestStoredDeliveryMessagesPreservesLocalizedContext(t *testing.T) {
+	run := storage.DigestRun{DigestDate: "2026-07-10", Timezone: "Europe/Moscow"}
+	items := []storage.DigestItem{{
+		StartupName: "Acme",
+		Summary:     "Builds useful tools",
+		SignalType:  "funding",
+		Region:      "US",
+		Categories:  []string{"Developer Tools"},
+		Funding: storage.DigestFunding{
+			Round: "Series A", Amount: "12 million", Currency: "USD",
+		},
+		Rank: 1,
+	}}
+
+	text := (Generator{}).StoredDeliveryMessages(run, items)[0].Text
+
+	for _, expected := range []string{
+		"📝 <b>Описание:</b> Builds useful tools",
+		"💡 <b>Почему интересно:</b> Компания привлекла финансирование (раунд A, 12 million USD)",
+		"🌍 Регион: США",
+		"🏷 Категории: инструменты для разработчиков",
+		"💰 Финансирование: раунд A, 12 million USD",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("stored delivery lost %q:\n%s", expected, text)
+		}
+	}
+}
+
+func TestWhyInterestingUsesRegionInvestorsAndIndependentSources(t *testing.T) {
+	text := (Generator{}).RenderMessages(Digest{Items: []Item{{
+		StartupName: "Acme",
+		SignalType:  "funding",
+		Region:      "EU",
+		Funding: FundingInfo{
+			Round: "Seed", Investors: []string{"Northwind"},
+		},
+		Sources: []SourceAttribution{
+			{SourceID: "publisher-a", SourceURL: "https://a.example/first"},
+			{SourceID: "publisher-a", SourceURL: "https://a.example/second"},
+			{SourceID: "publisher-b", SourceURL: "https://b.example/story"},
+		},
+	}}})[0].Text
+
+	want := []string{
+		"инвесторы: Northwind",
+		"Регион проекта: Европа.",
+		"Сигнал отмечен в 2 независимых источниках.",
+	}
+	for _, expected := range want {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in why-interesting block:\n%s", expected, text)
+		}
+	}
+	if strings.Contains(text, "Сигнал отмечен в 3") {
+		t.Fatalf("same publisher was counted more than once: %s", text)
+	}
+}
+
+func TestKnownSignalTypesAreLocalizedAndExplained(t *testing.T) {
+	tests := []struct {
+		signalType string
+		display    string
+		reason     string
+	}{
+		{signalType: "acquisition", display: "приобретение", reason: "Зафиксировано приобретение компании"},
+		{signalType: "award", display: "награда", reason: "Компания получила награду"},
+		{signalType: "ranking", display: "рейтинг", reason: "Компания вошла в отраслевой рейтинг"},
+	}
+	for _, test := range tests {
+		t.Run(test.signalType, func(t *testing.T) {
+			text := (Generator{}).RenderMessages(Digest{Items: []Item{{
+				StartupName: "Acme", SignalType: test.signalType,
+			}}})[0].Text
+			if !strings.Contains(text, "📣 Сигнал: "+test.display) || !strings.Contains(text, test.reason) {
+				t.Fatalf("known signal %q was not localized and explained: %s", test.signalType, text)
+			}
+		})
+	}
+}
+
+func TestSupportedFundingRoundsAreLocalized(t *testing.T) {
+	tests := []struct {
+		round string
+		want  string
+	}{
+		{round: "growth", want: "раунд роста"},
+		{round: "Series E", want: "раунд E"},
+		{round: "series z", want: "раунд Z"},
+		{round: "Strategic", want: "Strategic"},
+	}
+	for _, test := range tests {
+		t.Run(test.round, func(t *testing.T) {
+			if got := displayFundingRound(test.round); got != test.want {
+				t.Fatalf("displayFundingRound(%q) = %q, want %q", test.round, got, test.want)
+			}
+		})
 	}
 }
 
@@ -529,6 +655,7 @@ func TestStoredDeliveryMessagesTruncatesSingleOversizedItem(t *testing.T) {
 	items := []storage.DigestItem{{
 		StartupName: "Huge & <unsafe>",
 		Summary:     strings.Repeat("very long summary & details ", 400),
+		SignalType:  "launch",
 		Rank:        1,
 		SourceURLs:  []string{"https://source.example/oversized"},
 	}}
@@ -541,7 +668,8 @@ func TestStoredDeliveryMessagesTruncatesSingleOversizedItem(t *testing.T) {
 	if len(messages[0].Text) > DefaultMessageLength {
 		t.Fatalf("message exceeds Telegram limit: %d", len(messages[0].Text))
 	}
-	if !strings.Contains(messages[0].Text, "…") || strings.Contains(messages[0].Text, "<unsafe>") {
+	if !strings.Contains(messages[0].Text, "…") || !strings.Contains(messages[0].Text, "Почему интересно") ||
+		strings.Contains(messages[0].Text, "<unsafe>") {
 		t.Fatalf("expected escaped truncated fallback: %s", messages[0].Text)
 	}
 }

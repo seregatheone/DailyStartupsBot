@@ -30,6 +30,8 @@ func TestSQLiteRepositoryPersistsStateAcrossReinitialization(t *testing.T) {
 	digest := DigestRun{ID: "digest-1", DigestDate: "2026-07-09", Timezone: "Europe/Moscow", CandidateCount: 3, CreatedAt: now}
 	item := DigestItem{
 		ID: "item-1", DigestID: digest.ID, CandidateIdentity: "url:https://acme.example", StartupName: "Acme AI", Summary: "Acme AI launched.", Rank: 1,
+		SignalType: "funding", Region: "EU", Categories: []string{"AI", "SaaS"},
+		Funding:    DigestFunding{Round: "Seed", Amount: "5 million", Currency: "EUR", Investors: []string{"Northwind"}},
 		SourceURLs: []string{"https://source.example/acme"},
 		SourceAttributions: []SourceAttribution{{
 			SourceID: "innovate-uk", SourceURL: "https://source.example/acme",
@@ -446,7 +448,9 @@ CREATE TABLE digest_items (
 	source_urls_json TEXT NOT NULL
 );
 INSERT INTO digest_runs (id, digest_date, timezone, created_at)
-VALUES ('legacy-digest', '2026-07-10', 'UTC', '2026-07-10T08:00:00Z')
+VALUES ('legacy-digest', '2026-07-10', 'UTC', '2026-07-10T08:00:00Z');
+INSERT INTO digest_items (id, digest_id, startup_name, summary, rank, source_urls_json)
+VALUES ('legacy-item', 'legacy-digest', 'Legacy Co', 'Legacy summary', 1, '["https://source.example/legacy"]')
 `)
 	must(t, err)
 	must(t, db.Close())
@@ -456,7 +460,9 @@ VALUES ('legacy-digest', '2026-07-10', 'UTC', '2026-07-10T08:00:00Z')
 		must(t, err)
 		run, items, err := repo.GetDigestRun(ctx, "legacy-digest")
 		must(t, err)
-		if run.CandidateCount != 0 || len(items) != 0 {
+		if run.CandidateCount != 0 || len(items) != 1 || items[0].StartupName != "Legacy Co" ||
+			items[0].Summary != "Legacy summary" || items[0].SignalType != "" || items[0].Region != "" ||
+			len(items[0].Categories) != 0 || !reflect.DeepEqual(items[0].Funding, DigestFunding{}) {
 			t.Fatalf("legacy digest migration changed state: run=%#v items=%#v", run, items)
 		}
 		must(t, repo.Close())
@@ -467,6 +473,10 @@ VALUES ('legacy-digest', '2026-07-10', 'UTC', '2026-07-10T08:00:00Z')
 	defer db.Close()
 	assertSQLiteColumnCount(t, db, "digest_runs", "candidate_count", 1)
 	assertSQLiteColumnCount(t, db, "digest_items", "candidate_identity", 1)
+	assertSQLiteColumnCount(t, db, "digest_items", "signal_type", 1)
+	assertSQLiteColumnCount(t, db, "digest_items", "region", 1)
+	assertSQLiteColumnCount(t, db, "digest_items", "categories_json", 1)
+	assertSQLiteColumnCount(t, db, "digest_items", "funding_json", 1)
 }
 
 func TestSQLiteRepositoryMigratesAndPreservesSourceAttemptCadence(t *testing.T) {
