@@ -90,6 +90,10 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 		{table: "digest_runs", name: "candidate_count", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "digest_items", name: "candidate_identity", definition: "TEXT NOT NULL DEFAULT ''"},
 		{table: "digest_items", name: "source_attributions_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{table: "digest_items", name: "signal_type", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "digest_items", name: "region", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "digest_items", name: "categories_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{table: "digest_items", name: "funding_json", definition: "TEXT NOT NULL DEFAULT '{}'"},
 		{table: "source_health", name: "last_attempt_at", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, column := range columns {
@@ -459,18 +463,34 @@ func (repo *SQLiteRepository) SaveDigestItem(ctx context.Context, item DigestIte
 	if err != nil {
 		return err
 	}
+	categories, err := marshalStrings(item.Categories)
+	if err != nil {
+		return err
+	}
+	funding, err := marshalDigestFunding(item.Funding)
+	if err != nil {
+		return err
+	}
 	_, err = repo.db.ExecContext(ctx, `
-INSERT INTO digest_items (id, digest_id, candidate_identity, startup_name, summary, rank, source_urls_json, source_attributions_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO digest_items (
+	id, digest_id, candidate_identity, startup_name, summary, signal_type, region,
+	categories_json, funding_json, rank, source_urls_json, source_attributions_json
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	digest_id = excluded.digest_id,
 	candidate_identity = excluded.candidate_identity,
 	startup_name = excluded.startup_name,
 	summary = excluded.summary,
+	signal_type = excluded.signal_type,
+	region = excluded.region,
+	categories_json = excluded.categories_json,
+	funding_json = excluded.funding_json,
 	rank = excluded.rank,
 	source_urls_json = excluded.source_urls_json,
 	source_attributions_json = excluded.source_attributions_json
-`, item.ID, item.DigestID, item.CandidateIdentity, item.StartupName, item.Summary, item.Rank, sourceURLs, sourceAttributions)
+`, item.ID, item.DigestID, item.CandidateIdentity, item.StartupName, item.Summary,
+		item.SignalType, item.Region, categories, funding, item.Rank, sourceURLs, sourceAttributions)
 	return err
 }
 
@@ -517,10 +537,22 @@ ON CONFLICT(id) DO UPDATE SET
 		if err != nil {
 			return err
 		}
+		categories, err := marshalStrings(item.Categories)
+		if err != nil {
+			return err
+		}
+		funding, err := marshalDigestFunding(item.Funding)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO digest_items (id, digest_id, candidate_identity, startup_name, summary, rank, source_urls_json, source_attributions_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-`, item.ID, item.DigestID, item.CandidateIdentity, item.StartupName, item.Summary, item.Rank, sourceURLs, sourceAttributions); err != nil {
+INSERT INTO digest_items (
+	id, digest_id, candidate_identity, startup_name, summary, signal_type, region,
+	categories_json, funding_json, rank, source_urls_json, source_attributions_json
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, item.ID, item.DigestID, item.CandidateIdentity, item.StartupName, item.Summary,
+			item.SignalType, item.Region, categories, funding, item.Rank, sourceURLs, sourceAttributions); err != nil {
 			return err
 		}
 	}
@@ -540,7 +572,8 @@ WHERE id = ?
 	run.CreatedAt = parseStoredTime(createdAt)
 
 	rows, err := repo.db.QueryContext(ctx, `
-	SELECT id, digest_id, candidate_identity, startup_name, summary, rank, source_urls_json, source_attributions_json
+	SELECT id, digest_id, candidate_identity, startup_name, summary, signal_type, region,
+		categories_json, funding_json, rank, source_urls_json, source_attributions_json
 FROM digest_items
 WHERE digest_id = ?
 ORDER BY rank ASC
@@ -553,11 +586,19 @@ ORDER BY rank ASC
 	var items []DigestItem
 	for rows.Next() {
 		var item DigestItem
+		var categories string
+		var funding string
 		var sourceURLs string
 		var sourceAttributions string
-		if err := rows.Scan(&item.ID, &item.DigestID, &item.CandidateIdentity, &item.StartupName, &item.Summary, &item.Rank, &sourceURLs, &sourceAttributions); err != nil {
+		if err := rows.Scan(
+			&item.ID, &item.DigestID, &item.CandidateIdentity, &item.StartupName, &item.Summary,
+			&item.SignalType, &item.Region, &categories, &funding, &item.Rank,
+			&sourceURLs, &sourceAttributions,
+		); err != nil {
 			return DigestRun{}, nil, err
 		}
+		item.Categories = unmarshalOptionalStrings(categories)
+		item.Funding = unmarshalDigestFunding(funding)
 		item.SourceURLs = unmarshalStrings(sourceURLs)
 		item.SourceAttributions = unmarshalSourceAttributions(sourceAttributions)
 		items = append(items, item)
@@ -1185,6 +1226,14 @@ func unmarshalStrings(raw string) []string {
 	return values
 }
 
+func unmarshalOptionalStrings(raw string) []string {
+	values := unmarshalStrings(raw)
+	if len(values) == 0 {
+		return nil
+	}
+	return values
+}
+
 func canonicalSourceIDs(values []string) []string {
 	unique := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -1221,6 +1270,22 @@ func unmarshalSourceAttributions(raw string) []SourceAttribution {
 		return nil
 	}
 	return values
+}
+
+func marshalDigestFunding(value DigestFunding) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalDigestFunding(raw string) DigestFunding {
+	var value DigestFunding
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return DigestFunding{}
+	}
+	return value
 }
 
 func formatTime(value time.Time) string {

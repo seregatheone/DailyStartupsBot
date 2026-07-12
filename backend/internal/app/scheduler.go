@@ -439,11 +439,20 @@ func scheduledDigestSnapshot(
 			}
 		}
 		items = append(items, storage.DigestItem{
-			ID:                 stableScheduledID("item", fmt.Sprintf("%s:%d", digestID, index+1)),
-			DigestID:           digestID,
-			CandidateIdentity:  generatedItem.CandidateIdentity(),
-			StartupName:        generatedItem.StartupName,
-			Summary:            generatedItem.Description,
+			ID:                stableScheduledID("item", fmt.Sprintf("%s:%d", digestID, index+1)),
+			DigestID:          digestID,
+			CandidateIdentity: generatedItem.CandidateIdentity(),
+			StartupName:       generatedItem.StartupName,
+			Summary:           generatedItem.Description,
+			SignalType:        generatedItem.SignalType,
+			Region:            generatedItem.Region,
+			Categories:        append([]string(nil), generatedItem.Categories...),
+			Funding: storage.DigestFunding{
+				Round:     generatedItem.Funding.Round,
+				Amount:    generatedItem.Funding.Amount,
+				Currency:  generatedItem.Funding.Currency,
+				Investors: append([]string(nil), generatedItem.Funding.Investors...),
+			},
 			Rank:               index + 1,
 			SourceURLs:         sourceURLs,
 			SourceAttributions: sourceAttributions,
