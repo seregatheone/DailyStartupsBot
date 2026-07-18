@@ -29,6 +29,10 @@ type SignalStore interface {
 	SaveSourceHealth(context.Context, storage.SourceHealth) error
 }
 
+type sourceIngestionStore interface {
+	SaveSourceIngestion(context.Context, []storage.StartupSignal, storage.SourceHealth) error
+}
+
 type sourceHealthReader interface {
 	GetSourceHealth(context.Context, string) (storage.SourceHealth, error)
 }
@@ -103,7 +107,7 @@ func (service Service) Run(ctx context.Context, configs []config.SourceConfig) (
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		cadenceSkipped, cadenceErr := service.reserveSourceAttempt(ctx, source)
+		cadenceSkipped, attemptAt, _, cadenceErr := service.reserveSourceAttempt(ctx, source)
 		if cadenceErr != nil {
 			result.Sources = append(result.Sources, SourceResult{
 				SourceID: source.Config.ID,
@@ -121,12 +125,14 @@ func (service Service) Run(ctx context.Context, configs []config.SourceConfig) (
 			})
 			continue
 		}
-		sourceResult, err := service.fetchSource(ctx, source, &result)
+		sourceResult, err := service.fetchSource(ctx, source, attemptAt, &result)
 		result.Sources = append(result.Sources, sourceResult)
 		if ctx.Err() != nil {
+			service.releaseSourceAttempt(source.Config.ID, attemptAt)
 			return result, ctx.Err()
 		}
 		if err != nil {
+			service.releaseSourceAttempt(source.Config.ID, attemptAt)
 			persistenceErrors = append(persistenceErrors, err)
 		}
 	}
@@ -137,10 +143,10 @@ func (service Service) Run(ctx context.Context, configs []config.SourceConfig) (
 func (service Service) reserveSourceAttempt(
 	ctx context.Context,
 	source RegisteredSource,
-) (bool, error) {
+) (bool, time.Time, time.Time, error) {
 	cadence, err := time.ParseDuration(source.Config.FetchCadence)
 	if err != nil || cadence <= 0 {
-		return false, nil
+		return false, time.Time{}, time.Time{}, nil
 	}
 	if service.attempts == nil {
 		service.attempts = &sourceAttemptGuard{last: make(map[string]time.Time)}
@@ -153,32 +159,51 @@ func (service Service) reserveSourceAttempt(
 	if reader, ok := service.store.(sourceHealthReader); ok {
 		health, readErr := reader.GetSourceHealth(ctx, source.Config.ID)
 		if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
-			return false, fmt.Errorf("read cadence state for source %s: %w", source.Config.ID, readErr)
+			return false, time.Time{}, time.Time{}, fmt.Errorf("read cadence state for source %s: %w", source.Config.ID, readErr)
 		}
 		if readErr == nil && health.LastAttemptAt.After(lastAttempt) {
 			lastAttempt = health.LastAttemptAt
 		}
 	}
 	if !lastAttempt.IsZero() && now.Before(lastAttempt.Add(cadence)) {
-		return true, nil
+		return true, time.Time{}, time.Time{}, nil
 	}
 	if service.store != nil {
+		persistedAttemptAt := now
+		if _, atomic := service.store.(sourceIngestionStore); atomic {
+			// Atomic stores only advance the durable cadence marker together with
+			// the complete source result. The in-memory guard still prevents an
+			// overlapping fetch in this process.
+			persistedAttemptAt = lastAttempt
+		}
 		if err := service.store.SaveSourceHealth(ctx, storage.SourceHealth{
 			SourceID:        source.Config.ID,
 			Status:          StatusFetching,
 			LastIngestionAt: now,
-			LastAttemptAt:   now,
+			LastAttemptAt:   persistedAttemptAt,
 		}); err != nil {
-			return false, fmt.Errorf("reserve cadence for source %s: %w", source.Config.ID, err)
+			return false, time.Time{}, time.Time{}, fmt.Errorf("reserve cadence for source %s: %w", source.Config.ID, err)
 		}
 	}
 	service.attempts.last[source.Config.ID] = now
-	return false, nil
+	return false, now, lastAttempt, nil
+}
+
+func (service Service) releaseSourceAttempt(sourceID string, attemptAt time.Time) {
+	if service.attempts == nil || attemptAt.IsZero() {
+		return
+	}
+	service.attempts.mu.Lock()
+	defer service.attempts.mu.Unlock()
+	if service.attempts.last[sourceID].Equal(attemptAt) {
+		delete(service.attempts.last, sourceID)
+	}
 }
 
 func (service Service) fetchSource(
 	ctx context.Context,
 	source RegisteredSource,
+	attemptAt time.Time,
 	result *RunResult,
 ) (SourceResult, error) {
 	adapterResult, err := source.Adapter.Fetch(ctx, source.Config)
@@ -191,7 +216,7 @@ func (service Service) fetchSource(
 			}, ctx.Err()
 		}
 		message := observableSourceFailure(err)
-		healthErr := service.saveHealth(ctx, source.Config.ID, StatusFailed, message)
+		healthErr := service.saveHealth(ctx, source.Config.ID, StatusFailed, message, attemptAt)
 		return SourceResult{
 			SourceID: source.Config.ID,
 			Status:   StatusFailed,
@@ -200,7 +225,7 @@ func (service Service) fetchSource(
 	}
 	if !adapterResult.valid() {
 		message := "source adapter returned invalid result"
-		healthErr := service.saveHealth(ctx, source.Config.ID, StatusFailed, message)
+		healthErr := service.saveHealth(ctx, source.Config.ID, StatusFailed, message, attemptAt)
 		return SourceResult{
 			SourceID: source.Config.ID,
 			Status:   StatusFailed,
@@ -220,6 +245,8 @@ func (service Service) fetchSource(
 		incrementRejection(&sourceResult, "adapter_rejected", adapterResult.Skipped)
 	}
 	var persistenceErrors []error
+	atomicStore, atomic := service.store.(sourceIngestionStore)
+	pendingSignals := make([]storage.StartupSignal, 0, len(adapterResult.Records))
 
 	for _, record := range adapterResult.Records {
 		signal, err := NormalizeSignalWithPolicy(
@@ -241,6 +268,10 @@ func (service Service) fetchSource(
 			continue
 		}
 		sourceResult.Normalized++
+		if atomic {
+			pendingSignals = append(pendingSignals, signal)
+			continue
+		}
 		if service.store != nil {
 			if err := service.store.SaveStartupSignal(ctx, signal); err != nil {
 				sourceResult.StoreFailed++
@@ -264,7 +295,34 @@ func (service Service) fetchSource(
 	if len(persistenceErrors) > 0 {
 		healthMessage = "one or more normalized signals could not be persisted"
 	}
-	if err := service.saveHealth(ctx, source.Config.ID, sourceResult.Status, healthMessage); err != nil {
+	if atomic {
+		health := storage.SourceHealth{
+			SourceID:        source.Config.ID,
+			Status:          sourceResult.Status,
+			LastIngestionAt: service.now(),
+			LastAttemptAt:   attemptAt,
+			LastError:       healthMessage,
+		}
+		if err := atomicStore.SaveSourceIngestion(ctx, pendingSignals, health); err != nil {
+			sourceResult.Status = StatusFailed
+			sourceResult.StoreFailed = len(pendingSignals)
+			sourceResult.Message = appendMessage(
+				sourceResult.Message,
+				"complete source result could not be persisted",
+			)
+			return sourceResult, fmt.Errorf("store ingestion for source %s: %w", source.Config.ID, err)
+		}
+		sourceResult.Stored = len(pendingSignals)
+		result.Signals = append(result.Signals, pendingSignals...)
+		return sourceResult, nil
+	}
+	if err := service.saveHealth(
+		ctx,
+		source.Config.ID,
+		sourceResult.Status,
+		healthMessage,
+		attemptAt,
+	); err != nil {
 		persistenceErrors = append(persistenceErrors, err)
 	}
 	return sourceResult, errors.Join(persistenceErrors...)
@@ -280,7 +338,11 @@ func incrementRejection(result *SourceResult, reason string, count int) {
 	result.RejectionReasons[reason] += count
 }
 
-func (service Service) saveHealth(ctx context.Context, sourceID, status, message string) error {
+func (service Service) saveHealth(
+	ctx context.Context,
+	sourceID, status, message string,
+	lastAttemptAt time.Time,
+) error {
 	if service.store == nil {
 		return nil
 	}
@@ -288,6 +350,7 @@ func (service Service) saveHealth(ctx context.Context, sourceID, status, message
 		SourceID:        sourceID,
 		Status:          status,
 		LastIngestionAt: service.now(),
+		LastAttemptAt:   lastAttemptAt,
 		LastError:       message,
 	}); err != nil {
 		return fmt.Errorf("store health for source %s: %w", sourceID, err)

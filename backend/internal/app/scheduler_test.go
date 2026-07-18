@@ -337,18 +337,35 @@ func TestScheduledPipelineDoesNotPublishPartialDigestAfterIngestionStorageFailur
 	cfg.Timezone = "UTC"
 	cfg.IngestionTime = "07:00"
 	cfg.DeliveryTime = "09:00"
-	cfg.Sources = []config.SourceConfig{{ID: "source", Active: true, AccessMethod: "api"}}
+	cfg.Sources = []config.SourceConfig{{
+		ID: "source", Active: true, AccessMethod: "api", FetchCadence: "60m",
+	}}
+	attempts := 0
 	registry := eligibleSchedulerRegistry(schedulerAdapter{
-		id: "source", records: []ingestion.SourceRecord{{
-			StartupName: "Retry Co", SourceURL: "https://source.example/retry",
-			SignalType: "launch", PublishedAt: now.Add(-time.Hour),
-		}},
+		id: "source", attempts: &attempts, records: []ingestion.SourceRecord{
+			{
+				StartupName: "Persisted Co", SourceURL: "https://source.example/persisted",
+				SignalType: "launch", PublishedAt: now.Add(-2 * time.Hour),
+			},
+			{
+				StartupName: "Retry Co", SourceURL: "https://source.example/retry",
+				SignalType: "launch", PublishedAt: now.Add(-time.Hour),
+			},
+		},
 	})
 	pipeline := NewScheduledPipelineWithRegistry(cfg, repository, testLogger(), registry)
 
 	first, err := pipeline.RunOnce(ctx, now)
-	if err == nil || first.Queued != 0 || first.Failed != 1 {
+	if err == nil || first.Queued != 0 || first.Failed != 1 || attempts != 1 {
 		t.Fatalf("storage failure should block publication: result=%#v err=%v", first, err)
+	}
+	partial, err := sqliteRepository.ListStartupSignals(ctx, now.Add(-24*time.Hour), now.Add(time.Hour))
+	if err != nil || len(partial) != 0 {
+		t.Fatalf("failed source transaction left partial signals: signals=%#v err=%v", partial, err)
+	}
+	health, err := sqliteRepository.GetSourceHealth(ctx, "source")
+	if err != nil || !health.LastAttemptAt.IsZero() {
+		t.Fatalf("failed persistence retained cadence reservation: health=%#v err=%v", health, err)
 	}
 	due, err := sqliteRepository.ListDueDeliveries(ctx, now)
 	if err != nil || len(due) != 0 {
@@ -356,12 +373,20 @@ func TestScheduledPipelineDoesNotPublishPartialDigestAfterIngestionStorageFailur
 	}
 
 	second, err := pipeline.RunOnce(ctx, now.Add(time.Minute))
-	if err != nil || second.Queued != 1 || !second.IngestionRan {
+	if err != nil || second.Queued != 1 || !second.IngestionRan || attempts != 2 {
 		t.Fatalf("next tick did not recover publication: result=%#v err=%v", second, err)
 	}
 	due, err = sqliteRepository.ListDueDeliveries(ctx, now.Add(time.Minute))
 	if err != nil || len(due) != 1 {
 		t.Fatalf("recovered digest was not published: due=%#v err=%v", due, err)
+	}
+	_, items, err := sqliteRepository.GetDigestRun(ctx, due[0].DigestID)
+	itemNames := make(map[string]bool, len(items))
+	for _, item := range items {
+		itemNames[item.StartupName] = true
+	}
+	if err != nil || len(items) != 2 || !itemNames["Persisted Co"] || !itemNames["Retry Co"] {
+		t.Fatalf("recovered digest is incomplete: items=%#v err=%v", items, err)
 	}
 }
 
@@ -520,15 +545,16 @@ type failOnceSignalRepository struct {
 	failed bool
 }
 
-func (repository *failOnceSignalRepository) SaveStartupSignal(
+func (repository *failOnceSignalRepository) SaveSourceIngestion(
 	ctx context.Context,
-	signal storage.StartupSignal,
+	signals []storage.StartupSignal,
+	health storage.SourceHealth,
 ) error {
 	if !repository.failed {
 		repository.failed = true
-		return errors.New("temporary signal storage failure")
+		return errors.New("temporary source transaction failure")
 	}
-	return repository.SQLiteRepository.SaveStartupSignal(ctx, signal)
+	return repository.SQLiteRepository.SaveSourceIngestion(ctx, signals, health)
 }
 
 func (adapter schedulerAdapter) Metadata() ingestion.SourceMetadata {
