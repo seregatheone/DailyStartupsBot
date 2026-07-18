@@ -331,7 +331,15 @@ WHERE telegram_id = ?
 }
 
 func (repo *SQLiteRepository) SaveSourceHealth(ctx context.Context, health SourceHealth) error {
-	_, err := repo.db.ExecContext(ctx, `
+	return saveSourceHealth(ctx, repo.db, health)
+}
+
+type statementExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func saveSourceHealth(ctx context.Context, executor statementExecutor, health SourceHealth) error {
+	_, err := executor.ExecContext(ctx, `
 INSERT INTO source_health (source_id, status, last_ingestion_at, last_attempt_at, last_error)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(source_id) DO UPDATE SET
@@ -363,7 +371,11 @@ WHERE source_id = ?
 }
 
 func (repo *SQLiteRepository) SaveStartupSignal(ctx context.Context, signal StartupSignal) error {
-	_, err := repo.db.ExecContext(ctx, `
+	return saveStartupSignal(ctx, repo.db, signal)
+}
+
+func saveStartupSignal(ctx context.Context, executor statementExecutor, signal StartupSignal) error {
+	_, err := executor.ExecContext(ctx, `
 INSERT INTO startup_signals (id, startup_name, canonical_url, source_id, source_url, signal_type, published_at, description, region, raw_payload)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
@@ -378,6 +390,41 @@ ON CONFLICT(id) DO UPDATE SET
 	raw_payload = excluded.raw_payload
 `, signal.ID, signal.StartupName, signal.CanonicalURL, signal.SourceID, signal.SourceURL, signal.SignalType, formatTime(signal.PublishedAt), signal.Description, signal.Region, signal.RawPayload)
 	return err
+}
+
+// SaveSourceIngestion commits all normalized signals and the completed cadence
+// marker as one unit. A failure cannot leave a digest-visible partial result.
+func (repo *SQLiteRepository) SaveSourceIngestion(
+	ctx context.Context,
+	signals []StartupSignal,
+	health SourceHealth,
+) error {
+	for _, signal := range signals {
+		if signal.SourceID != health.SourceID {
+			return fmt.Errorf(
+				"startup signal %q belongs to source %q, expected %q",
+				signal.ID,
+				signal.SourceID,
+				health.SourceID,
+			)
+		}
+	}
+
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, signal := range signals {
+		if err := saveStartupSignal(ctx, tx, signal); err != nil {
+			return fmt.Errorf("save startup signal %q: %w", signal.ID, err)
+		}
+	}
+	if err := saveSourceHealth(ctx, tx, health); err != nil {
+		return fmt.Errorf("save source health %q: %w", health.SourceID, err)
+	}
+	return tx.Commit()
 }
 
 func (repo *SQLiteRepository) GetStartupSignal(ctx context.Context, id string) (StartupSignal, error) {

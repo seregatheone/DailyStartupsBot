@@ -90,6 +90,56 @@ func TestSQLiteRepositoryPersistsStateAcrossReinitialization(t *testing.T) {
 	assertEqual(t, []DeliveryAttempt{attempt}, gotAttempts)
 }
 
+func TestSaveSourceIngestionRollsBackAllSignalsWhenOneInsertFails(t *testing.T) {
+	ctx := context.Background()
+	repo, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "atomic-ingestion.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	previousAttempt := time.Date(2026, 7, 10, 7, 0, 0, 0, time.UTC)
+	previousHealth := SourceHealth{
+		SourceID:        "source",
+		Status:          "fetching",
+		LastIngestionAt: previousAttempt,
+		LastAttemptAt:   previousAttempt,
+	}
+	must(t, repo.SaveSourceHealth(ctx, previousHealth))
+	if _, err := repo.db.ExecContext(ctx, `
+CREATE TRIGGER reject_second_ingestion_signal
+BEFORE INSERT ON startup_signals
+WHEN NEW.id = 'signal-2'
+BEGIN
+	SELECT RAISE(FAIL, 'injected signal failure');
+END
+`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	completedAt := previousAttempt.Add(time.Hour)
+	err = repo.SaveSourceIngestion(ctx, []StartupSignal{
+		{ID: "signal-1", StartupName: "Persisted Co", SourceID: "source", SourceURL: "https://example.com/1", PublishedAt: completedAt},
+		{ID: "signal-2", StartupName: "Retry Co", SourceID: "source", SourceURL: "https://example.com/2", PublishedAt: completedAt},
+	}, SourceHealth{
+		SourceID:        "source",
+		Status:          "ok",
+		LastIngestionAt: completedAt,
+		LastAttemptAt:   completedAt,
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected signal failure") {
+		t.Fatalf("expected injected transaction failure, got %v", err)
+	}
+	if _, err := repo.GetStartupSignal(ctx, "signal-1"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("first signal survived failed transaction: %v", err)
+	}
+	gotHealth, err := repo.GetSourceHealth(ctx, "source")
+	if err != nil {
+		t.Fatalf("get source health: %v", err)
+	}
+	assertEqual(t, previousHealth, gotHealth)
+}
+
 func TestListActiveSubscribersFiltersAndOrders(t *testing.T) {
 	ctx := context.Background()
 	repo, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "subscribers.db"))
