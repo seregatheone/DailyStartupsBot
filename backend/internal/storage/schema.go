@@ -34,7 +34,8 @@ var migrationStatements = []string{
 		published_at TEXT NOT NULL,
 		description TEXT NOT NULL DEFAULT '',
 		region TEXT NOT NULL DEFAULT '',
-		raw_payload TEXT NOT NULL DEFAULT ''
+		raw_payload TEXT NOT NULL DEFAULT '',
+		published_at_unix_nano INTEGER
 	)`,
 	`CREATE TABLE IF NOT EXISTS digest_runs (
 		id TEXT PRIMARY KEY,
