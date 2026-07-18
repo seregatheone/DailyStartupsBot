@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,8 +49,14 @@ type SQLiteRepository struct {
 }
 
 func OpenSQLite(ctx context.Context, path string) (*SQLiteRepository, error) {
-	if err := ensureParentDir(path); err != nil {
+	filesystemPath, persistent, err := sqliteFilesystemPath(path)
+	if err != nil {
 		return nil, err
+	}
+	if persistent {
+		if err := prepareSQLitePath(filesystemPath); err != nil {
+			return nil, err
+		}
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -61,6 +69,12 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteRepository, error) {
 	if err := repo.Migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if persistent {
+		if err := secureSQLiteFiles(filesystemPath); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	return repo, nil
 }
@@ -1361,15 +1375,120 @@ WHERE d.status IN ('retry', 'failed', 'blocked')
 	return snapshot, nil
 }
 
-func ensureParentDir(path string) error {
-	if strings.HasPrefix(path, "file:") || path == ":memory:" {
-		return nil
+func sqliteFilesystemPath(dsn string) (string, bool, error) {
+	if dsn == ":memory:" {
+		return "", false, nil
 	}
+	if !strings.HasPrefix(dsn, "file:") {
+		return dsn, true, nil
+	}
+	uri, err := url.Parse(dsn)
+	if err != nil {
+		return "", false, fmt.Errorf("parse sqlite file URI: %w", err)
+	}
+	if uri.Query().Get("mode") == "memory" || uri.Opaque == ":memory:" || uri.Path == ":memory:" {
+		return "", false, nil
+	}
+	if uri.Host != "" && uri.Host != "localhost" {
+		return "", false, fmt.Errorf("sqlite file URI host must be empty or localhost")
+	}
+	path := uri.Path
+	if uri.Opaque != "" {
+		path, err = url.PathUnescape(uri.Opaque)
+		if err != nil {
+			return "", false, fmt.Errorf("decode sqlite file URI path: %w", err)
+		}
+	}
+	if path == "" {
+		return "", false, fmt.Errorf("sqlite file URI path is empty")
+	}
+	return path, true, nil
+}
+
+func prepareSQLitePath(path string) error {
+	if err := ensureParentDir(path); err != nil {
+		return err
+	}
+	if err := secureSQLiteFile(path, true); err != nil {
+		return fmt.Errorf("secure sqlite database: %w", err)
+	}
+	return secureSQLiteFiles(path)
+}
+
+func ensureParentDir(path string) error {
 	dir := filepath.Dir(path)
 	if dir == "." || dir == "" {
 		return nil
 	}
-	return os.MkdirAll(dir, 0o755)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create sqlite parent directory: %w", err)
+	}
+	return nil
+}
+
+func secureSQLiteFiles(path string) error {
+	for _, candidate := range []string{path, path + "-journal", path + "-wal", path + "-shm"} {
+		if err := secureSQLiteFile(candidate, candidate == path); err != nil {
+			return fmt.Errorf("secure sqlite file %q: %w", candidate, err)
+		}
+	}
+	return nil
+}
+
+func secureSQLiteFile(path string, create bool) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			if !create {
+				return nil
+			}
+			// #nosec G304 -- path is trusted operator configuration, not request input.
+			file, openErr := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+			if errors.Is(openErr, os.ErrExist) {
+				continue
+			}
+			if openErr != nil {
+				return openErr
+			}
+			if chmodErr := file.Chmod(0o600); chmodErr != nil {
+				_ = file.Close()
+				return chmodErr
+			}
+			return file.Close()
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symbolic link")
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("expected regular file, got mode %s", info.Mode())
+		}
+
+		// Open first and chmod the verified file descriptor so a path swap cannot
+		// redirect permission changes to a different file.
+		// #nosec G304 -- path is trusted operator configuration, not request input.
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		openedInfo, statErr := file.Stat()
+		if statErr != nil {
+			_ = file.Close()
+			return statErr
+		}
+		if !os.SameFile(info, openedInfo) {
+			_ = file.Close()
+			return fmt.Errorf("file changed while permissions were checked")
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return err
+		}
+		return file.Close()
+	}
+	return fmt.Errorf("file changed while it was being created")
 }
 
 func marshalStrings(values []string) (string, error) {

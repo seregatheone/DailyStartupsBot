@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -88,6 +90,113 @@ func TestSQLiteRepositoryPersistsStateAcrossReinitialization(t *testing.T) {
 		t.Fatalf("list attempts: %v", err)
 	}
 	assertEqual(t, []DeliveryAttempt{attempt}, gotAttempts)
+}
+
+func TestOpenSQLiteCreatesPrivateDirectoryDatabaseAndWALSidecars(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not available on Windows")
+	}
+	ctx := context.Background()
+	privateDir := filepath.Join(t.TempDir(), "backend", "data")
+	dbPath := filepath.Join(privateDir, "private.db")
+	repo, err := OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	var journalMode string
+	if err := repo.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&journalMode); err != nil {
+		t.Fatalf("enable WAL: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("unexpected journal mode: %q", journalMode)
+	}
+	if _, err := repo.db.ExecContext(ctx, `CREATE TABLE permission_probe (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create WAL probe: %v", err)
+	}
+	if _, err := repo.db.ExecContext(ctx, `INSERT INTO permission_probe DEFAULT VALUES`); err != nil {
+		t.Fatalf("write WAL probe: %v", err)
+	}
+
+	assertPermissions(t, filepath.Dir(privateDir), 0o700)
+	assertPermissions(t, privateDir, 0o700)
+	assertPermissions(t, dbPath, 0o600)
+	assertPermissions(t, dbPath+"-wal", 0o600)
+	assertPermissions(t, dbPath+"-shm", 0o600)
+}
+
+func TestOpenSQLiteTightensExistingDatabaseWithoutChangingParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not available on Windows")
+	}
+	ctx := context.Background()
+	parent := filepath.Join(t.TempDir(), "shared-parent")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatalf("set parent permissions: %v", err)
+	}
+	dbPath := filepath.Join(parent, "existing.db")
+	if err := os.WriteFile(dbPath, nil, 0o644); err != nil {
+		t.Fatalf("create existing database: %v", err)
+	}
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatalf("set database permissions: %v", err)
+	}
+
+	repo, err := OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer repo.Close()
+
+	assertPermissions(t, dbPath, 0o600)
+	assertPermissions(t, parent, 0o755)
+}
+
+func TestOpenSQLiteRejectsDatabaseSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior differs on Windows")
+	}
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target.db")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	link := filepath.Join(parent, "database.db")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	if _, err := OpenSQLite(context.Background(), link); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("database symlink was not rejected: %v", err)
+	}
+}
+
+func TestSQLiteFilesystemPathRecognizesPersistentAndMemoryDSNs(t *testing.T) {
+	tests := []struct {
+		name       string
+		dsn        string
+		path       string
+		persistent bool
+		wantError  bool
+	}{
+		{name: "plain", dsn: "data/backend.db", path: "data/backend.db", persistent: true},
+		{name: "relative file URI", dsn: "file:data%2Fbackend.db?mode=rwc", path: "data/backend.db", persistent: true},
+		{name: "memory", dsn: ":memory:"},
+		{name: "memory file URI", dsn: "file:cache?mode=memory"},
+		{name: "remote host", dsn: "file://example.com/backend.db", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path, persistent, err := sqliteFilesystemPath(test.dsn)
+			if (err != nil) != test.wantError || path != test.path || persistent != test.persistent {
+				t.Fatalf("sqliteFilesystemPath(%q) = (%q, %t, %v)", test.dsn, path, persistent, err)
+			}
+		})
+	}
 }
 
 func TestSaveSourceIngestionRollsBackAllSignalsWhenOneInsertFails(t *testing.T) {
@@ -1406,6 +1515,17 @@ func openTestRepository(t *testing.T) *SQLiteRepository {
 	must(t, err)
 	t.Cleanup(func() { must(t, repo.Close()) })
 	return repo
+}
+
+func assertPermissions(t *testing.T, path string, expected os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != expected {
+		t.Fatalf("unexpected permissions for %s: got %04o want %04o", path, got, expected)
+	}
 }
 
 func assertSQLiteColumnCount(t *testing.T, db *sql.DB, table, column string, expected int) {
