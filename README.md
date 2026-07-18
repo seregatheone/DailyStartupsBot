@@ -27,6 +27,12 @@ Backend:
 - `DAILY_STARTUPS_INTERNAL_API_SECRET`
 - `DAILY_STARTUPS_SOURCES_JSON`
 
+`DAILY_STARTUPS_DATABASE_PATH` должен указывать на локальный приватный путь. Новые каталоги,
+создаваемые backend для SQLite, получают mode `0700`, а database и SQLite sidecar-файлы —
+`0600`. При открытии существующего database backend безопасно ужесточает его mode до `0600`,
+но не меняет права уже существующих родительских каталогов: для shared path заранее создайте
+выделенный owner-only каталог.
+
 Bot:
 
 - `DAILY_STARTUPS_BOT_ENV`
