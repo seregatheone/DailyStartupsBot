@@ -199,6 +199,86 @@ func TestListStartupSignalsUsesUTCHalfOpenWindowAndStableOrder(t *testing.T) {
 	}
 }
 
+func TestListStartupSignalsMigratesLegacyTimestampsAndExcludesCorruption(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "legacy-signals.db")
+	db, err := sql.Open("sqlite", dbPath)
+	must(t, err)
+	_, err = db.ExecContext(ctx, `
+CREATE TABLE startup_signals (
+	id TEXT PRIMARY KEY,
+	startup_name TEXT NOT NULL,
+	canonical_url TEXT NOT NULL DEFAULT '',
+	source_id TEXT NOT NULL,
+	source_url TEXT NOT NULL,
+	signal_type TEXT NOT NULL,
+	published_at TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	region TEXT NOT NULL DEFAULT '',
+	raw_payload TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO startup_signals (id, startup_name, source_id, source_url, signal_type, published_at)
+VALUES
+	('valid', 'Valid', 'source', 'https://source/valid', 'news', '2026-07-10T07:30:00Z'),
+	('corrupt', 'Corrupt', 'source', 'https://source/corrupt', 'news', '2026-07-10T07:not-a-time');
+`)
+	must(t, err)
+	must(t, db.Close())
+
+	repo, err := OpenSQLite(ctx, dbPath)
+	must(t, err)
+	defer repo.Close()
+
+	from := time.Date(2026, 7, 10, 7, 0, 0, 0, time.UTC)
+	signals, err := repo.ListStartupSignals(ctx, from, from.Add(time.Hour))
+	must(t, err)
+	if len(signals) != 1 || signals[0].ID != "valid" {
+		t.Fatalf("legacy timestamp migration returned unexpected signals: %#v", signals)
+	}
+	var corruptUnixNano int64
+	if err := repo.db.QueryRowContext(ctx, `
+SELECT published_at_unix_nano
+FROM startup_signals
+WHERE id = 'corrupt'
+`).Scan(&corruptUnixNano); err != nil {
+		t.Fatalf("read corrupt timestamp sentinel: %v", err)
+	}
+	if corruptUnixNano != invalidStartupSignalUnixNano {
+		t.Fatalf("corrupt timestamp was not quarantined: %d", corruptUnixNano)
+	}
+}
+
+func TestListStartupSignalsUsesPublishedAtRangeIndex(t *testing.T) {
+	ctx := context.Background()
+	repo, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "signals-query-plan.db"))
+	must(t, err)
+	defer repo.Close()
+
+	from := time.Date(2026, 7, 10, 7, 0, 0, 0, time.UTC)
+	rows, err := repo.db.QueryContext(
+		ctx,
+		"EXPLAIN QUERY PLAN "+listStartupSignalsQuery,
+		from.UnixNano(),
+		from.Add(24*time.Hour).UnixNano(),
+	)
+	must(t, err)
+	defer rows.Close()
+
+	var details []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		must(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		details = append(details, detail)
+	}
+	must(t, rows.Err())
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "USING INDEX idx_startup_signals_published_at_id") ||
+		strings.Contains(plan, "SCAN startup_signals") {
+		t.Fatalf("startup signal range query is not indexed:\n%s", plan)
+	}
+}
+
 func TestSaveDigestSnapshotReplacesItemsAtomically(t *testing.T) {
 	ctx := context.Background()
 	repo, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "digest-snapshot.db"))

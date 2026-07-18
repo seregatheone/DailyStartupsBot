@@ -95,6 +95,7 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 		{table: "digest_items", name: "categories_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{table: "digest_items", name: "funding_json", definition: "TEXT NOT NULL DEFAULT '{}'"},
 		{table: "source_health", name: "last_attempt_at", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "startup_signals", name: "published_at_unix_nano", definition: "INTEGER"},
 	}
 	for _, column := range columns {
 		if err := repo.ensureColumn(ctx, column.table, column.name, column.definition); err != nil {
@@ -102,6 +103,15 @@ func (repo *SQLiteRepository) Migrate(ctx context.Context) error {
 		}
 	}
 	if err := repo.backfillSourceAttemptTimes(ctx); err != nil {
+		return err
+	}
+	if _, err := repo.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_startup_signals_published_at_id
+ON startup_signals (published_at_unix_nano, id)
+`); err != nil {
+		return fmt.Errorf("create startup signal time index: %w", err)
+	}
+	if err := repo.backfillStartupSignalUnixNanos(ctx); err != nil {
 		return err
 	}
 	return repo.normalizePreferenceItemLimits(ctx)
@@ -117,6 +127,83 @@ WHERE last_attempt_at = '' AND status IN ('ok', 'failed', 'fetching')
 		return fmt.Errorf("backfill source attempt times: %w", err)
 	}
 	return nil
+}
+
+const invalidStartupSignalUnixNano int64 = -1 << 63
+
+func (repo *SQLiteRepository) backfillStartupSignalUnixNanos(ctx context.Context) error {
+	const batchSize = 500
+	for {
+		migrated, err := repo.backfillStartupSignalUnixNanoBatch(ctx, batchSize)
+		if err != nil {
+			return err
+		}
+		if migrated < batchSize {
+			return nil
+		}
+	}
+}
+
+func (repo *SQLiteRepository) backfillStartupSignalUnixNanoBatch(ctx context.Context, limit int) (int, error) {
+	rows, err := repo.db.QueryContext(ctx, `
+SELECT id, published_at
+FROM startup_signals
+WHERE published_at_unix_nano IS NULL
+ORDER BY id
+LIMIT ?
+`, limit)
+	if err != nil {
+		return 0, fmt.Errorf("read startup signal timestamps for backfill: %w", err)
+	}
+	type pendingTimestamp struct {
+		id       string
+		unixNano int64
+	}
+	pending := make([]pendingTimestamp, 0)
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan startup signal timestamp for backfill: %w", err)
+		}
+		unixNano := invalidStartupSignalUnixNano
+		if parsed := parseStoredTime(raw); !parsed.IsZero() {
+			candidate := parsed.UnixNano()
+			if time.Unix(0, candidate).UTC().Equal(parsed.UTC()) {
+				unixNano = candidate
+			}
+		}
+		pending = append(pending, pendingTimestamp{id: id, unixNano: unixNano})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("read startup signal timestamps for backfill: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close startup signal timestamp backfill rows: %w", err)
+	}
+	if len(pending) == 0 {
+		return 0, nil
+	}
+
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin startup signal timestamp backfill: %w", err)
+	}
+	defer tx.Rollback()
+	for _, timestamp := range pending {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE startup_signals
+SET published_at_unix_nano = ?
+WHERE id = ?
+`, timestamp.unixNano, timestamp.id); err != nil {
+			return 0, fmt.Errorf("backfill startup signal %q timestamp: %w", timestamp.id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit startup signal timestamp backfill: %w", err)
+	}
+	return len(pending), nil
 }
 
 func (repo *SQLiteRepository) normalizePreferenceItemLimits(ctx context.Context) error {
@@ -375,9 +462,16 @@ func (repo *SQLiteRepository) SaveStartupSignal(ctx context.Context, signal Star
 }
 
 func saveStartupSignal(ctx context.Context, executor statementExecutor, signal StartupSignal) error {
-	_, err := executor.ExecContext(ctx, `
-INSERT INTO startup_signals (id, startup_name, canonical_url, source_id, source_url, signal_type, published_at, description, region, raw_payload)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	publishedAtUnixNano, err := startupSignalUnixNano(signal.PublishedAt)
+	if err != nil {
+		return err
+	}
+	_, err = executor.ExecContext(ctx, `
+INSERT INTO startup_signals (
+	id, startup_name, canonical_url, source_id, source_url, signal_type, published_at,
+	description, region, raw_payload, published_at_unix_nano
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	startup_name = excluded.startup_name,
 	canonical_url = excluded.canonical_url,
@@ -387,9 +481,24 @@ ON CONFLICT(id) DO UPDATE SET
 	published_at = excluded.published_at,
 	description = excluded.description,
 	region = excluded.region,
-	raw_payload = excluded.raw_payload
-`, signal.ID, signal.StartupName, signal.CanonicalURL, signal.SourceID, signal.SourceURL, signal.SignalType, formatTime(signal.PublishedAt), signal.Description, signal.Region, signal.RawPayload)
+	raw_payload = excluded.raw_payload,
+	published_at_unix_nano = excluded.published_at_unix_nano
+`, signal.ID, signal.StartupName, signal.CanonicalURL, signal.SourceID, signal.SourceURL,
+		signal.SignalType, formatTime(signal.PublishedAt), signal.Description, signal.Region,
+		signal.RawPayload, publishedAtUnixNano)
 	return err
+}
+
+func startupSignalUnixNano(publishedAt time.Time) (any, error) {
+	if publishedAt.IsZero() {
+		return nil, nil
+	}
+	publishedAt = publishedAt.UTC()
+	unixNano := publishedAt.UnixNano()
+	if !time.Unix(0, unixNano).UTC().Equal(publishedAt) {
+		return nil, fmt.Errorf("startup signal published time is outside UnixNano range")
+	}
+	return unixNano, nil
 }
 
 // SaveSourceIngestion commits all normalized signals and the completed cadence
@@ -442,11 +551,23 @@ WHERE id = ?
 	return signal, nil
 }
 
-func (repo *SQLiteRepository) ListStartupSignals(ctx context.Context, from, until time.Time) ([]StartupSignal, error) {
-	rows, err := repo.db.QueryContext(ctx, `
+const listStartupSignalsQuery = `
 SELECT id, startup_name, canonical_url, source_id, source_url, signal_type, published_at, description, region, raw_payload
 FROM startup_signals
-`)
+WHERE published_at_unix_nano >= ? AND published_at_unix_nano < ?
+ORDER BY published_at_unix_nano, id
+`
+
+func (repo *SQLiteRepository) ListStartupSignals(ctx context.Context, from, until time.Time) ([]StartupSignal, error) {
+	fromUnixNano, err := startupSignalUnixNano(from)
+	if err != nil {
+		return nil, fmt.Errorf("invalid startup signal range start: %w", err)
+	}
+	untilUnixNano, err := startupSignalUnixNano(until)
+	if err != nil {
+		return nil, fmt.Errorf("invalid startup signal range end: %w", err)
+	}
+	rows, err := repo.db.QueryContext(ctx, listStartupSignalsQuery, fromUnixNano, untilUnixNano)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +592,10 @@ FROM startup_signals
 			return nil, err
 		}
 		signal.PublishedAt = parseStoredTime(publishedAt)
-		if signal.PublishedAt.Before(from) || !signal.PublishedAt.Before(until) {
+		// Invalid legacy timestamps receive a sentinel during migration and are
+		// excluded by the indexed range. Keep this guard for defensive reads from
+		// databases modified outside the application.
+		if signal.PublishedAt.IsZero() {
 			continue
 		}
 		signals = append(signals, signal)
@@ -479,12 +603,6 @@ FROM startup_signals
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	sort.Slice(signals, func(left, right int) bool {
-		if signals[left].PublishedAt.Equal(signals[right].PublishedAt) {
-			return signals[left].ID < signals[right].ID
-		}
-		return signals[left].PublishedAt.Before(signals[right].PublishedAt)
-	})
 	return signals, nil
 }
 
